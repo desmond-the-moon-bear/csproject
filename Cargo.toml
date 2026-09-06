@@ -1,0 +1,14 @@
+[package]
+name = "csproject"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rayon = { version = "1.12.0" }
+crossbeam = { version = "0.8.5" }
+clap = { version = "4.6.6", features = ["derive"] }
+log = { version = "0.4.34" }
+env_logger = { version = "0.11.11" }
+http = { version = "1.5.0" }
+biscotti = { version = "0.4.3" }
+
