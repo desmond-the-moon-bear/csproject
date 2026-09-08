@@ -1,0 +1,8 @@
+[default.databases.sqlite]
+url = "./data/database.sqlite"
+
+[default.tls]
+# this command was used to generate the testing certificates
+# openssl req -x509 -newkey rsa:2048 -keyout thinger.key -out thinger.cert -days 365 -nodes -addext "subjectAltName=DNS:example.com,DNS:www.example.com" -addext "basicConstraints=critical,CA:FALSE" -addext "extendedKeyUsage=serverAuth"
+key = "./data/thinger.key"
+certs = "./data/thinger.cert"

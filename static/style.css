@@ -1,0 +1,108 @@
+:root {
+    --section-color: #eee;
+}
+
+html {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    height: 100%;
+    font-family: "Consolas";
+    text-align: justify;
+
+    color: #3f3f3f;
+    background-color: #ddd;
+}
+
+header {
+    margin: 0 auto;
+    padding: 1em 5em 0.01em 5em; 
+    min-height: 8em;
+    max-width: 55em;
+    background-color: var(--section-color);
+}
+
+main {
+    margin: 0 auto;
+    padding: 2em 5em;
+    max-width: 55em;
+    background-color: var(--section-color);
+}
+
+section {
+    margin: 0 auto;
+}
+
+.footnotes {
+    font-size: 0.8em;
+}
+
+footer {
+    margin: 0 auto;
+    padding: 1em 5em;
+    max-width: 55em;
+    background-color: var(--section-color);
+}
+
+iframe.code_snippet {
+    width: 100%;
+    height: 50em;
+}
+
+div.code_block {
+    background-color: #f8f8f8;
+    border: 1px solid #3f3f3f;
+}
+
+div.code_block pre {
+    margin: 0em 0em 1em 1em;
+}
+
+code.inline {
+    color: #111;
+    font-family: "Consolas", monospace;
+    font-size: 0.7em;
+    border: 4px solid #bababa;
+    border-radius: 5px;
+    background-color: #bababa;
+}
+
+a {
+    padding: 0.1em 0.1em;
+    color: #464;
+    font-weight: bold;
+    text-decoration: none;
+}
+a:hover {
+    background-color: #aaa;
+}
+
+.hN {
+    margin: 0.5em;
+}
+
+.navbar ul {
+    list-style-type: none;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: #333333;
+    text-align: center;
+}
+.navbar ul li {
+    display: inline-block;
+    margin: 0 auto;
+    max-width: 20em;
+}
+.navbar ul li a {
+    display: block;
+    color: white;
+    text-align: center;
+    padding: 14px 16px;
+    text-decoration: none;
+}
+.navbar ul li a:hover {
+    background-color: #111111;
+}
