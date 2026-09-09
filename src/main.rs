@@ -1,8 +1,8 @@
 mod db;
-mod session;
+mod cache;
 
 use db::Db;
-use session::Sessions;
+use cache::Sessions;
 
 use rocket::fairing::AdHoc;
 use rocket::fs::{FileServer, relative};

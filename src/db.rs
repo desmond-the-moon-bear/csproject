@@ -1,17 +1,90 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use rocket::{Rocket, Build};
-use rocket_sync_db_pools::rusqlite::{self, params};
+use rocket_sync_db_pools::rusqlite::{self, params, Error as DbError};
 use rocket_sync_db_pools::database;
+
+use rocket::serde::Serialize;
 
 #[database("sqlite")]
 pub struct Db(rusqlite::Connection);
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(crate = "rocket::serde")]
 pub struct User {
-    pub id: usize,
     pub name: String,
-    pub secret: Option<String>,
+    #[serde(skip_serializing)]
+    pub secret: String,
     pub points: usize,
+    #[serde(skip_serializing)]
     pub admin: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Move {
+    pub id: usize,
+    pub sender: usize,
+    pub receiver: usize,
+    pub date: u64,
+    pub message: Option<String>,
+    pub status: MoveStatus,
+}
+
+fn seconds_from_unix_epoch() -> u64 {
+    use std::time::SystemTime;
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(n) => n.as_secs(),
+        Err(_) => 0,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum MoveStatus {
+    #[default]
+    New,
+    Accepted,
+    Cancelled,
+}
+
+impl From<usize> for MoveStatus {
+    fn from(value: usize) -> Self {
+        match value {
+            1 => Self::Accepted,
+            2 => Self::Cancelled,
+            _ => Self::New,
+        }
+    }
+}
+
+impl From<MoveStatus> for usize {
+    fn from(value: MoveStatus) -> Self {
+        use MoveStatus::*;
+        match value {
+            New => 0,
+            Accepted => 1,
+            Cancelled => 2,
+        }
+    }
+}
+
+impl Serialize for MoveStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: rocket::serde::Serializer {
+        serializer.serialize_u8(<usize>::from(*self) as u8)
+    }
+}
+
+impl std::fmt::Display for MoveStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use MoveStatus::*;
+        let name = match self {
+            New => "new",
+            Accepted => "accepted",
+            Cancelled => "cancelled",
+        };
+        write!(f, "{}", name)
+    }
 }
 
 pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
@@ -29,13 +102,16 @@ pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
 
             create table if not exists moves (
                 id integer primary key autoincrement,
-                sender integer,
-                receiver integer,
+                sender integer not null,
+                receiver integer not null,
                 message varchar,
                 date integer not null,
+                status integer not null,
                 foreign key (sender)   references users(id),
                 foreign key (receiver) references users(id)
             );
+
+            insert or replace into users values (0, 'placeholder', '', 0, FALSE);
             "#)?;
 
             if let Ok(admin_password) = std::env::var("ADMIN_PASS") {
@@ -47,5 +123,185 @@ pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
         }).await
         .expect("database init");
     rocket
+}
+
+#[cfg(feature = "secure")]
+async fn read_user(db: &Db, name: String) -> Option<User> {
+    db.run(move |connection| {
+        connection.query_row(
+            "select * from users where users.name = ?1;",
+            params![name],
+            |row| {
+                let user = User {
+                    name   : row.get(0)?,
+                    secret : row.get(1)?,
+                    points : row.get(2)?,
+                    admin  : row.get(3)?,
+                };
+                Ok(user)
+            })
+    }).await.ok()
+}
+
+#[cfg(not(feature = "secure"))]
+async fn read_user(db: &Db, name: String) -> Option<User> {
+    let query = format!("select * from users where users.name = '{}';", name);
+    db.run(move |connection| {
+        connection.query_row(
+            &query,
+            params![],
+            |row| {
+                let user = User {
+                    name   : row.get(0)?,
+                    secret : row.get(1)?,
+                    points : row.get(2)?,
+                    admin  : row.get(3)?,
+                };
+                Ok(user)
+            })
+    }).await.ok()
+}
+
+macro_rules! handle {
+    ($result:ident) => {
+        #[cfg(feature = "check")]
+        {
+            $result.unwrap();
+            #[allow(unreachable_code)]
+            return Ok(());
+        }
+        if $result.is_ok() {
+            Ok(())
+        } else {
+            Err(())
+        }
+    };
+}
+
+async fn write_user(db: &Db, user: User) -> Result<(), ()> {
+    let result = db.run(move |connection| {
+        connection.execute(
+            "insert into users(name, secret, points, admin) values (?1, ?2, ?3, ?4);",
+            params![
+                user.name,
+                user.secret,
+                user.points,
+                user.admin
+            ]
+        )
+    }).await;
+    handle!{result}
+}
+
+async fn update_user_points(db: &Db, user_id: usize, points: usize) -> Result<(), ()> {
+    let result = db.run(move |connection| {
+        connection.execute(
+            "update users set points = ?1 where id = ?2;",
+            params![
+                points,
+                user_id
+            ]
+        )
+    }).await;
+    handle!{result}
+}
+
+async fn create_move(db: &Db, move_instance: Move) -> Result<(), ()> {
+    let result = db.run(move |connection| {
+        connection.execute(
+            "insert into moves(sender, receiver, message, date, status) values(?1, ?2, ?3, ?4, ?5);",
+            params![
+                move_instance.sender,
+                move_instance.receiver,
+                move_instance.message,
+                move_instance.date,
+                <usize>::from(move_instance.status),
+            ]
+        )
+    }).await;
+    handle!{result}
+}
+
+async fn update_move_status(db: &Db, move_id: usize, status: MoveStatus) -> Result<(), ()> {
+    let result = db.run(move |connection| {
+        connection.execute(
+            "update moves set status = ?1 where id = ?2;",
+            params![
+                <usize>::from(status),
+                move_id,
+            ]
+        )
+    }).await;
+    handle!{result}
+}
+
+fn parse_row_to_move(row: &rocket_sync_db_pools::rusqlite::Row<'_>) -> Result<Move, DbError> {
+    let status: usize = row.get(5)?;
+
+    let move_instance = Move {
+        id       : row.get(0)?,
+        sender   : row.get(1)?,
+        receiver : row.get(2)?,
+        date     : row.get(3)?,
+        message  : row.get(4)?,
+        status: <MoveStatus>::from(status),
+    };
+
+    Ok(move_instance)
+}
+
+async fn read_move(db: &Db, move_id: usize) -> Option<Move> {
+    db.run(move |connection| {
+        connection.query_row(
+            "select * from moves where move.id = ?1;",
+            params![move_id],
+            parse_row_to_move
+        )
+    }).await.ok()
+}
+
+async fn list_moves(db: &Db) -> Vec<Move> {
+    let result = db.run(|connection| -> Result<Vec<Move>, DbError> {
+        let moves = connection
+            .prepare("select * from moves;")?
+            .query_map(params![], parse_row_to_move)?
+            .flatten()
+            .collect::<Vec<_>>();
+        Ok(moves)
+    }).await;
+    #[cfg(feature = "check")]
+    #[allow(unreachable_code)]
+    return result.unwrap();
+    result.unwrap_or_default()
+}
+
+async fn list_ougoing_moves(db: &Db, sender: usize) -> Vec<Move> {
+    let result = db.run(move |connection| -> Result<Vec<Move>, DbError> {
+        let moves = connection
+            .prepare("select * from moves where moves.sender = ?1 and moves.status = 0;")?
+            .query_map(params![sender], parse_row_to_move)?
+            .flatten()
+            .collect::<Vec<_>>();
+        Ok(moves)
+    }).await;
+    #[cfg(feature = "check")]
+    #[allow(unreachable_code)]
+    return result.unwrap();
+    result.unwrap_or_default()
+}
+
+async fn list_incoming_moves(db: &Db, receiver: usize) -> Vec<Move> {
+    let result = db.run(move |connection| -> Result<Vec<Move>, DbError> {
+        let moves = connection
+            .prepare("select * from moves where moves.receiver = ?1 and moves.status = 0;")?
+            .query_map(params![receiver], parse_row_to_move)?
+            .flatten()
+            .collect::<Vec<_>>();
+        Ok(moves)
+    }).await;
+    #[cfg(feature = "check")]
+    #[allow(unreachable_code)]
+    return result.unwrap();
+    result.unwrap_or_default()
 }
 
