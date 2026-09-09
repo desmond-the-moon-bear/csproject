@@ -8,7 +8,12 @@
 
     <body>
         <header>
+            {{#if user}}
+            <h1 class="hN"> greetings, {{user.name}} </h1>
+            <h2 class="hN"> balance: {{user.points}}p </h2>
+            {{else}}
             <h1 class="hN"> home </h1>
+            {{/if}}
             <hr>
             {{#if user}}
                 <a href="send">send points</a> | 
@@ -21,6 +26,11 @@
                 <a href="register">register</a>
             {{/if}}
         </header>
+        <footer>
+            {{#if error_text}}
+                <p>{{error_text}}</p>
+            {{/if}}
+        </footer>
     </body>
 
     <script>

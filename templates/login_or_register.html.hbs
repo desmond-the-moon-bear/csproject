@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <link rel="stylesheet" href="./style.css">
+        <title>thinger</title>
+    </head>
+
+    <body>
+        <header>
+            <h1 class="hN"> {{action}} </h1>
+            <hr>
+        </header>
+        <main>
+            <form action="{{action}}" method="post">
+                <label for="name">name: </label>
+                <input type="text" name="name" id="name"><br>
+                <label for="secret">secret: </label>
+{{!--
+This input's type should most likely be "password", however, I don't want to
+deal with typos when I am testing.
+--}}
+                <input type="text" name="secret" id="secret"><br>
+                <input type="submit" value="{{action}}">
+            </form>
+        </main>
+        <footer>
+            {{#if error_text}}
+                <p>{{error_text}}</p>
+            {{/if}}
+        </footer>
+    </body>
+
+    <script>
+        // For debugging purposes.
+        console.log(document.cookie)
+    </script>
+</html>
