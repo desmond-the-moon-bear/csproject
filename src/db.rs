@@ -15,25 +15,25 @@ pub struct User {
     pub name: String,
     #[serde(skip_serializing)]
     pub secret: String,
-    pub points: usize,
+    pub points: i64,
     #[serde(skip_serializing)]
     pub admin: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Move {
-    pub id: usize,
-    pub sender: usize,
-    pub receiver: usize,
-    pub date: u64,
+    pub id: i64,
+    pub sender: i64,
+    pub receiver: i64,
+    pub date: i64,
     pub message: Option<String>,
     pub status: MoveStatus,
 }
 
-fn seconds_from_unix_epoch() -> u64 {
+fn seconds_from_unix_epoch() -> i64 {
     use std::time::SystemTime;
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(n) => n.as_secs(),
+        Ok(n) => n.as_secs() as i64,
         Err(_) => 0,
     }
 }
@@ -46,8 +46,8 @@ pub enum MoveStatus {
     Cancelled,
 }
 
-impl From<usize> for MoveStatus {
-    fn from(value: usize) -> Self {
+impl From<i64> for MoveStatus {
+    fn from(value: i64) -> Self {
         match value {
             1 => Self::Accepted,
             2 => Self::Cancelled,
@@ -56,7 +56,7 @@ impl From<usize> for MoveStatus {
     }
 }
 
-impl From<MoveStatus> for usize {
+impl From<MoveStatus> for i64 {
     fn from(value: MoveStatus) -> Self {
         use MoveStatus::*;
         match value {
@@ -71,7 +71,7 @@ impl Serialize for MoveStatus {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: rocket::serde::Serializer {
-        serializer.serialize_u8(<usize>::from(*self) as u8)
+        serializer.serialize_u8(<i64>::from(*self) as u8)
     }
 }
 
@@ -111,7 +111,7 @@ pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
                 foreign key (receiver) references users(id)
             );
 
-            insert or abort into users values (0, 'placeholder', '', 0, FALSE);
+            insert or ignore into users values (0, 'placeholder', '', 0, FALSE);
             "#)?;
 
             if let Ok(admin_password) = std::env::var("ADMIN_PASS") {
@@ -125,7 +125,7 @@ pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
     rocket
 }
 
-pub async fn read_user_by_id(db: &Db, user_id: usize) -> Option<User> {
+pub async fn read_user_by_id(db: &Db, user_id: i64) -> Option<User> {
     db.run(move |connection| {
         connection.query_row(
             "select name, secret, points, admin from users where users.id = ?1;",
@@ -211,7 +211,7 @@ pub async fn write_user(db: &Db, user: User) -> Result<(), ()> {
     handle!{result}
 }
 
-pub async fn update_user_points(db: &Db, user_id: usize, points: usize) -> Result<(), ()> {
+pub async fn update_user_points(db: &Db, user_id: i64, points: i64) -> Result<(), ()> {
     let result = db.run(move |connection| {
         connection.execute(
             "update users set points = ?1 where id = ?2;",
@@ -233,19 +233,19 @@ pub async fn create_move(db: &Db, move_instance: Move) -> Result<(), ()> {
                 move_instance.receiver,
                 move_instance.message,
                 move_instance.date,
-                <usize>::from(move_instance.status),
+                <i64>::from(move_instance.status),
             ]
         )
     }).await;
     handle!{result}
 }
 
-pub async fn update_move_status(db: &Db, move_id: usize, status: MoveStatus) -> Result<(), ()> {
+pub async fn update_move_status(db: &Db, move_id: i64, status: MoveStatus) -> Result<(), ()> {
     let result = db.run(move |connection| {
         connection.execute(
             "update moves set status = ?1 where id = ?2;",
             params![
-                <usize>::from(status),
+                <i64>::from(status),
                 move_id,
             ]
         )
@@ -254,7 +254,7 @@ pub async fn update_move_status(db: &Db, move_id: usize, status: MoveStatus) -> 
 }
 
 pub fn parse_row_to_move(row: &rocket_sync_db_pools::rusqlite::Row<'_>) -> Result<Move, DbError> {
-    let status: usize = row.get(5)?;
+    let status: i64 = row.get(5)?;
 
     let move_instance = Move {
         id       : row.get(0)?,
@@ -268,7 +268,7 @@ pub fn parse_row_to_move(row: &rocket_sync_db_pools::rusqlite::Row<'_>) -> Resul
     Ok(move_instance)
 }
 
-pub async fn read_move(db: &Db, move_id: usize) -> Option<Move> {
+pub async fn read_move(db: &Db, move_id: i64) -> Option<Move> {
     db.run(move |connection| {
         connection.query_row(
             "select * from moves where move.id = ?1;",
@@ -293,7 +293,7 @@ pub async fn list_moves(db: &Db) -> Vec<Move> {
     result.unwrap_or_default()
 }
 
-pub async fn list_ougoing_moves(db: &Db, sender: usize) -> Vec<Move> {
+pub async fn list_ougoing_moves(db: &Db, sender: i64) -> Vec<Move> {
     let result = db.run(move |connection| -> Result<Vec<Move>, DbError> {
         let moves = connection
             .prepare("select * from moves where moves.sender = ?1 and moves.status = 0;")?
@@ -308,7 +308,7 @@ pub async fn list_ougoing_moves(db: &Db, sender: usize) -> Vec<Move> {
     result.unwrap_or_default()
 }
 
-pub async fn list_incoming_moves(db: &Db, receiver: usize) -> Vec<Move> { let result = db.run(move |connection| -> Result<Vec<Move>, DbError> {
+pub async fn list_incoming_moves(db: &Db, receiver: i64) -> Vec<Move> { let result = db.run(move |connection| -> Result<Vec<Move>, DbError> {
         let moves = connection
             .prepare("select * from moves where moves.receiver = ?1 and moves.status = 0;")?
             .query_map(params![receiver], parse_row_to_move)?

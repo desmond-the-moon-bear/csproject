@@ -11,13 +11,13 @@ use dashmap::DashMap;
 #[derive(Debug, Default)]
 pub struct Sessions {
     // session-id: user-id
-    pub active_sessions: DashMap<usize, usize>,
+    pub active_sessions: DashMap<i64, i64>,
     pub session_count: AtomicUsize,
 }
 
 #[derive(Debug)]
 pub struct Cache {
-    pub users: Arc<Mutex<HashMap<usize, User>>>,
+    pub users: Arc<Mutex<HashMap<i64, User>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,9 +31,9 @@ pub struct MoveRecord<'user, 'm> {
 
 pub const ERROR: &str = "<error>";
 
-pub type Guard<'user> = MutexGuard<'user, HashMap<usize, User>>;
+pub type Guard<'user> = MutexGuard<'user, HashMap<i64, User>>;
 pub async fn cache_users_from_moves<'user>(db: &Db, cache: &'user Cache, moves: &[Move]) -> Guard<'user> {
-    async fn cache_user(db: &Db, users: &mut HashMap<usize, User>, user_id: usize) {
+    async fn cache_user(db: &Db, users: &mut HashMap<i64, User>, user_id: i64) {
         if !users.contains_key(&user_id) && let Some(user) = db::read_user_by_id(db, user_id).await {
             users.insert(user_id, user);
         }
@@ -46,7 +46,7 @@ pub async fn cache_users_from_moves<'user>(db: &Db, cache: &'user Cache, moves: 
     users
 }
 
-pub fn render_moves<'g, 'm>(users: &'g HashMap<usize, User>, moves: &'m [Move]) -> Vec<MoveRecord<'g, 'm>> {
+pub fn render_moves<'g, 'm>(users: &'g HashMap<i64, User>, moves: &'m [Move]) -> Vec<MoveRecord<'g, 'm>> {
     let mut result = vec![];
     for move_instance in moves {
         let sender = match users.get(&move_instance.sender) {
