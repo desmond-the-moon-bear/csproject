@@ -1,3 +1,4 @@
+#![allow(unused)]
 mod db;
 mod cache;
 
@@ -13,7 +14,7 @@ use rocket_dyn_templates::{Template, context};
 
 #[launch]
 fn rocket() -> _ {
-    rocket::build()
+    let mut rocket = rocket::build()
         .attach(Template::fairing())
         .attach(Db::fairing())
         .attach(AdHoc::on_ignite("Rusqlite Init", db::init_db))
@@ -28,7 +29,12 @@ fn rocket() -> _ {
                 confirm, cancel,
                 admin,
             ],
-        )
+        );
+    #[cfg(feature = "secure")]
+    {
+        rocket = rocket.attach(cache::Timeout);
+    }
+    rocket
 }
 
 const INDEX: &str = "index";
