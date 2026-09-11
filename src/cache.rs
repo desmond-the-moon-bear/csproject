@@ -1,29 +1,114 @@
 use super::db::{self, Db, User, Move, MoveStatus};
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-// A concurrent hash map.
-// use dashmap::DashMap;
+use base64::prelude::*;
 
+use rocket::fairing::{Fairing, Info, Kind};
+use rocket::http::{Cookie, private::cookie::Expiration};
 use rocket::time::Duration;
 use rocket::{Request, Data};
-use rocket::fairing::{Fairing, Info, Kind};
 use rocket::serde::Serialize;
 
+use rand::SeedableRng;
+use rand::Rng;
+use rand::rngs::{StdRng, SysRng};
+
 use smol::lock::{Mutex, MutexGuard};
+// use std::sync::{Mutex, MutexGuard};
+
+// 128 bits of entropy should be enough.
+pub type Id = [u8; 16];
+pub const ZERO_ID: Id = [0u8; 16];
+
+// #[cfg(feature = "secure")]
+// pub const SESSION_COOKIE_NAME: &str = "__Host-Http-id";
+// #[cfg(not(feature = "secure"))]
+pub const SESSION_COOKIE_NAME: &str = "id";
 
 #[derive(Debug, Default)]
 pub struct Sessions {
-    pub active: Arc<Mutex<HashMap<i64, Session>>>,
-    pub session_count: AtomicI64,
+    pub active: Arc<Mutex<HashMap<Id, Session>>>,
+    generator: SessionIdGenerator,
 }
 
 impl Sessions {
-    pub fn create(&self, user_id: usize) {
-        // self.session_count.fetch_add(1, order)
+    pub async fn fetch(&self, id: Id) -> Option<i64> {
+        self.active.lock().await.get(&id).map(|session| session.user_id)
+    }
+
+    pub async fn create(&self, user_id: i64) -> Cookie<'static> {
+        let mut active = self.active.lock().await;
+        let mut id = self.generator.generate().await;
+        // One must be *extremely* unlucky to go into this loop more than 0 times.
+        while active.contains_key(&id) {
+            id = self.generator.generate().await;
+        }
+        active.insert(id, Session::new(user_id));
+        let session = BASE64_URL_SAFE.encode(id);
+
+        #[cfg(not(feature = "secure"))]
+        {
+            Cookie::new(SESSION_COOKIE_NAME, session)
+        }
+
+        #[cfg(feature = "secure")]
+        {
+            Cookie::build((SESSION_COOKIE_NAME, session))
+                // Must be sent only through HTTPS.
+                .secure(true)
+                // Should not be accessible from JavaScript.
+                .http_only(true)
+                // The browser should send this cookie only to this server.
+                .same_site(rocket::http::SameSite::Strict)
+                .expires(Expiration::Session)
+                .build()
+        }
+    }
+
+    pub async fn drop(&self, id: Id) {
+        self.active.lock().await.remove(&id);
+    }
+}
+
+#[derive(Debug)]
+struct SessionIdGenerator {
+    #[cfg(not(feature = "secure"))]
+    counter: AtomicU64,
+    // The docs claim that this (i.e. StdRng) is a CSPRNG. Moreover I initialise it with a system
+    // provided random seed so it should be secure.
+    #[cfg(feature = "secure")]
+    rng: Arc<Mutex<StdRng>>,
+}
+
+impl SessionIdGenerator {
+    #[cfg(not(feature = "secure"))]
+    async fn generate(&self) -> Id {
+        let mut bytes = [0u8; 16];
+        let number = self.counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        bytes[0..8].copy_from_slice(&number.to_le_bytes());
+        bytes
+    }
+
+    #[cfg(feature = "secure")]
+    async fn generate(&self) -> Id {
+        let mut bytes = ZERO_ID;
+        self.rng.lock().await.fill_bytes(&mut bytes);
+        bytes
+    }
+}
+
+impl Default for SessionIdGenerator {
+    fn default() -> Self {
+        Self {
+            #[cfg(not(feature = "secure"))]
+            counter: Default::default(),
+            #[cfg(feature = "secure")]
+            rng: Arc::new(Mutex::new(StdRng::try_from_rng(&mut SysRng).unwrap()))
+        }
     }
 }
 
@@ -35,6 +120,7 @@ pub struct Session {
 }
 
 impl Session {
+    // There are probably more reasonable times for this, but oh well.
     pub const DEFAULT_IDLE_DURATION: Duration = Duration::minutes(2);
     pub const DEFAULT_TIMEOUT_DURATION: Duration = Duration::hours(1);
     pub fn new(user_id: i64) -> Self {
@@ -47,9 +133,15 @@ impl Session {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Cache {
     pub users: Arc<Mutex<HashMap<i64, User>>>,
+}
+
+impl Cache {
+    pub async fn set(&self, user: User) {
+        self.users.lock().await.insert(user.id, user);
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -66,7 +158,7 @@ pub const ERROR: &str = "<error>";
 pub type Guard<'user> = MutexGuard<'user, HashMap<i64, User>>;
 pub async fn cache_users_from_moves<'user>(db: &Db, cache: &'user Cache, moves: &[Move]) -> Guard<'user> {
     async fn cache_user(db: &Db, users: &mut HashMap<i64, User>, user_id: i64) {
-        if !users.contains_key(&user_id) && let Some(user) = db::read_user_by_id(db, user_id).await {
+        if !users.contains_key(&user_id) && let Ok(user) = db::read_user_by_id(db, user_id).await {
             users.insert(user_id, user);
         }
     }
