@@ -106,3 +106,7 @@ a:hover {
 .navbar ul li a:hover {
     background-color: #111111;
 }
+
+table, th, td {
+    border: 1px solid;
+}

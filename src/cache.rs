@@ -7,6 +7,8 @@ use std::time::SystemTime;
 
 use base64::prelude::*;
 
+use chrono::{DateTime, Local};
+
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{Cookie, private::cookie::Expiration};
 use rocket::time::Duration;
@@ -18,7 +20,6 @@ use rand::Rng;
 use rand::rngs::{StdRng, SysRng};
 
 use smol::lock::{Mutex, MutexGuard};
-// use std::sync::{Mutex, MutexGuard};
 
 // 128 bits of entropy should be enough.
 pub type Id = [u8; 16];
@@ -37,7 +38,11 @@ pub struct Sessions {
 
 impl Sessions {
     pub async fn fetch(&self, id: Id) -> Option<i64> {
-        self.active.lock().await.get(&id).map(|session| session.user_id)
+        if let Some(session) = self.active.lock().await.get_mut(&id) {
+            session.expire_for_idle = SystemTime::now() + Session::DEFAULT_IDLE_DURATION;
+            return Some(session.user_id);
+        }
+        None
     }
 
     pub async fn create(&self, user_id: i64) -> Cookie<'static> {
@@ -142,14 +147,23 @@ impl Cache {
     pub async fn set(&self, user: User) {
         self.users.lock().await.insert(user.id, user);
     }
+    
+    pub async fn set_points(&self, user_id: i64, points: i64) {
+        if let Some(user) = self.users.lock().await.get_mut(&user_id) {
+            user.points = points;
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(crate = "rocket::serde")]
 pub struct MoveRecord<'user, 'm> {
+    pub id: i64,
     pub sender: &'user str,
     pub receiver: &'user str,
-    pub message: &'m Option<String>,
+    pub amount: i64,
+    pub message: &'m String,
+    pub date: String,
     pub status: MoveStatus,
 }
 
@@ -170,7 +184,10 @@ pub async fn cache_users_from_moves<'user>(db: &Db, cache: &'user Cache, moves: 
     users
 }
 
-pub fn render_moves<'g, 'm>(users: &'g HashMap<i64, User>, moves: &'m [Move]) -> Vec<MoveRecord<'g, 'm>> {
+pub fn render_moves<'g, 'm>(
+    users: &'g HashMap<i64, User>,
+    moves: &'m [Move],
+) -> Vec<MoveRecord<'g, 'm>> {
     let mut result = vec![];
     for move_instance in moves {
         let sender = match users.get(&move_instance.sender) {
@@ -181,10 +198,17 @@ pub fn render_moves<'g, 'm>(users: &'g HashMap<i64, User>, moves: &'m [Move]) ->
             Some(user) => &user.name,
             None => ERROR,
         };
+
+        let system_time = db::time_from_seconds(move_instance.date);
+        let date = format_date(system_time);
+
         result.push(MoveRecord {
+            id: move_instance.id,
             sender,
             receiver,
+            amount: move_instance.amount,
             message: &move_instance.message,
+            date,
             status: move_instance.status,
         });
     }
@@ -211,7 +235,13 @@ impl Fairing for Timeout {
 
         let now = SystemTime::now();
         let mut active = sessions.active.lock().await;
-        active.retain(|_, value| !(value.expire_for_idle < now || value.expire_for_timeout < now));
+        active.retain(|_, value| value.expire_for_idle > now && value.expire_for_timeout > now);
     }
+}
+
+fn format_date(system_time: SystemTime) -> String {
+    DateTime::<Local>::from(system_time)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 

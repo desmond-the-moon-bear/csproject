@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <link rel="stylesheet" href="./style.css">
+        <title>thinger</title>
+    </head>
+
+    <body>
+        <header>
+            <h1 class="hN"> {{move_type}} point moves </h1>
+            <hr>
+            <a href="/">home</a>
+        </header>
+        <main>
+            <table>
+                <tr>
+                    <th>from</th>
+                    <th>to</th>
+                    <th>amount</th>
+                    <th>message</th>
+                    <th>date</th>
+                    {{#if show_status}}
+                        <th>status</th>
+                    {{/if}}
+                    {{#if can_accept}}
+                        <th>accept</th>
+                    {{/if}}
+                    {{#if can_cancel}}
+                        <th>cancel</th>
+                    {{/if}}
+                </tr>
+                {{#each moves}}
+                    <tr>
+                        <td>{{sender}}</td>
+                        <td>{{receiver}}</td>
+                        <td>{{amount}}</td>
+                        <td>{{message}}</td>
+                        <td>{{date}}</td>
+                        {{#if ../show_status}}
+                            <td>{{status}}</td>
+                        {{/if}}
+                        {{#if ../can_accept}}
+                            <td>
+                                <a href="accept/{{../move_type}}/{{id}}">accept</a>
+                            </td>
+                        {{/if}}
+                        {{#if ../can_cancel}}
+                            <td>
+                                <a href="cancel/{{../move_type}}/{{id}}">cancel</a>
+                            </td>
+                        {{/if}}
+                    </tr>
+                {{/each}}
+            </table>
+        </main>
+        <footer>
+            {{#if error_text}}
+                <p>{{error_text}}</p>
+            {{/if}}
+        </footer>
+    </body>
+
+    <script>
+        // For debugging purposes.
+        console.log(document.cookie)
+    </script>
+</html>

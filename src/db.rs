@@ -1,7 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use argon2::{
-    password_hash::{PasswordHasher, PasswordVerifier, phc::{PasswordHash, Error as PhcError}, Error as PasswordError},
+    password_hash::{
+        Error as PasswordError,
+        PasswordHasher,
+        PasswordVerifier,
+        phc::{PasswordHash, Error as PhcError},
+    },
     Argon2
 };
 
@@ -37,19 +42,20 @@ pub struct Move {
     pub id: i64,
     pub sender: i64,
     pub receiver: i64,
+    pub amount: i64,
+    pub message: String,
     pub date: i64,
-    pub message: Option<String>,
     pub status: MoveStatus,
 }
 
-fn seconds_from_unix_epoch() -> i64 {
+pub fn seconds_from_unix_epoch() -> i64 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(n) => n.as_secs() as i64,
         Err(_) => 0,
     }
 }
 
-fn time_from_seconds(seconds: i64) -> SystemTime {
+pub fn time_from_seconds(seconds: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64)
 }
 
@@ -119,7 +125,8 @@ pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
                 id integer primary key autoincrement,
                 sender integer not null,
                 receiver integer not null,
-                message varchar,
+                amount integer not null,
+                message varchar not null,
                 date integer not null,
                 status integer not null,
                 foreign key (sender)   references users(id),
@@ -226,30 +233,29 @@ pub async fn write_user(db: &Db, user: User) -> DefaultDbResult {
     }).await
 }
 
-pub async fn update_user_points(db: &Db, user_id: i64, points: i64) -> DefaultDbResult {
+pub async fn create_move(db: &Db, user_id: i64, new_points: i64, move_instance: Move) -> DefaultDbResult {
     db.run(move |connection| {
-        connection.execute(
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "update users set points = ?1 where id = ?2;",
             params![
-                points,
+                new_points,
                 user_id
             ]
-        )
-    }).await
-}
-
-pub async fn create_move(db: &Db, move_instance: Move) -> DefaultDbResult {
-    db.run(move |connection| {
-        connection.execute(
-            "insert into moves(sender, receiver, message, date, status) values(?1, ?2, ?3, ?4, ?5);",
+        )?;
+        transaction.execute(
+            "insert into moves(sender, receiver, amount, message, date, status) values(?1, ?2, ?3, ?4, ?5, ?6);",
             params![
                 move_instance.sender,
                 move_instance.receiver,
+                move_instance.amount,
                 move_instance.message,
                 move_instance.date,
                 <i64>::from(move_instance.status),
             ]
-        )
+        )?;
+        transaction.commit()?;
+        Ok(1)
     }).await
 }
 
@@ -266,14 +272,15 @@ pub async fn update_move_status(db: &Db, move_id: i64, status: MoveStatus) -> De
 }
 
 pub fn parse_row_to_move(row: &rocket_sync_db_pools::rusqlite::Row<'_>) -> Result<Move, DbError> {
-    let status: i64 = row.get(5)?;
+    let status: i64 = row.get(6)?;
 
     let move_instance = Move {
         id       : row.get(0)?,
         sender   : row.get(1)?,
         receiver : row.get(2)?,
-        date     : row.get(3)?,
+        amount   : row.get(3)?,
         message  : row.get(4)?,
+        date     : row.get(5)?,
         status: <MoveStatus>::from(status),
     };
 

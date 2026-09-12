@@ -14,14 +14,14 @@
         <main>
             <form action="{{action}}" method="post">
                 <label for="name">name: </label>
-                <input type="text" name="name" id="name"><br>
+                <input type="text" name="name" id="name"/><br>
                 <label for="secret">secret: </label>
 {{!--
 This input's type should most likely be "password", however, I don't want to
 deal with typos when I am testing.
 --}}
-                <input type="text" name="secret" id="secret"><br>
-                <input type="submit" value="{{action}}">
+                <input type="text" name="secret" id="secret"/><br>
+                <input type="submit" value="{{action}}"/>
             </form>
         </main>
         <footer>

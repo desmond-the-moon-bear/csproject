@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <link rel="stylesheet" href="./style.css">
+        <title>thinger</title>
+    </head>
+
+    <body>
+        <header>
+            <h1 class="hN"> send points </h1>
+            <hr>
+            <a href="/">home</a>
+        </header>
+        <main>
+            <p>available: {{user.points}}p</p>
+            <form action="send" method="post">
+                <label for="receiver">receiver: </label>
+                <input type="text" name="receiver" id="receiver"/><br>
+                <label for="amount">amount: </label>
+                <input type="text" name="amount" id="amount"/><br>
+                <label for="message">message: </label>
+                <textarea name="message" id="message"></textarea><br>
+                <input type="submit" value="send"/>
+            </form>
+        </main>
+        <footer>
+            {{#if error_text}}
+                <p>{{error_text}}</p>
+            {{/if}}
+        </footer>
+    </body>
+
+    <script>
+        // For debugging purposes.
+        console.log(document.cookie)
+    </script>
+</html>

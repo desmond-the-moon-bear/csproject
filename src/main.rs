@@ -2,7 +2,7 @@
 mod db;
 mod cache;
 
-use db::{Db, User};
+use db::{Db, User, Move};
 use cache::{Cache, Sessions, Id, ZERO_ID};
 
 use argon2::{
@@ -23,7 +23,6 @@ use rocket_dyn_templates::{Template, context};
 
 #[launch]
 fn rocket() -> _ {
-    env_logger::builder();
     let mut rocket = rocket::build()
         .attach(Template::fairing())
         .attach(Db::fairing())
@@ -37,7 +36,8 @@ fn rocket() -> _ {
                 index,
                 login_get, login_post,
                 register_get, register_post,
-                send, incoming, outgoing,
+                send_get, send_post,
+                incoming, outgoing,
                 confirm, cancel,
                 admin,
             ],
@@ -51,6 +51,8 @@ fn rocket() -> _ {
 
 const INDEX: &str = "index";
 const LOR: &str = "login_or_register";
+const MOVES: &str = "move_view";
+const SEND: &str = "create_move";
 
 fn get_session_id(cookies: &CookieJar<'_>) -> Option<Id> {
     let encoded_id = cookies.get(cache::SESSION_COOKIE_NAME)?.value();
@@ -75,17 +77,17 @@ async fn fetch_and_cache_user(
 ) -> Option<User> {
     let session_id = get_session_id(cookies)?;
     let user_id = sessions.fetch(session_id).await?;
-    {
-        // Drop the mutex guard at the end of the scope.
-        // let users = cache.users.lock().unwrap();
-        let users = cache.users.lock().await;
-        let cached_user_op = users.get(&user_id);
-        if let Some(cached_user) = cached_user_op {
-            return Some(cached_user.clone());
-        }
+    let users = cache.users.lock().await;
+    let cached_user_op = users.get(&user_id);
+    if let Some(cached_user) = cached_user_op {
+        return Some(cached_user.clone());
     }
     match db::read_user_by_id(db, user_id).await {
-        Ok(user_from_db) => Some(user_from_db),
+        Ok(user_from_db) => {
+            drop(users);
+            cache.set(user_from_db.clone()).await;
+            Some(user_from_db)
+        },
         Err(error) => {
             #[cfg(feature = "secure")]
             log::info!("Error fetching user from database: {}.", error);
@@ -146,7 +148,7 @@ async fn login_post(
             log::error!("Failed to authenticate user: {}.", error);
             use db::VerificationError::*;
             let error_text = match error {
-                Db(_) => "internal error",
+                Db(_) => "user does not exist",
                 Phc(_) | Password(_) => "incorrect password",
             };
             Template::render(LOR, context! { action: "login", error_text: error_text })
@@ -161,52 +163,169 @@ async fn register_get() -> Template {
 
 #[post("/register", data="<data>")]
 async fn register_post(data: Form<UserFormInfo>, db: Db) -> Template {
-    if db::read_user_by_name(&db, data.name.clone()).await.is_err() {
-        let UserFormInfo { name, mut secret } = data.into_inner();
-        #[cfg(feature = "secure")]
-        {
-            match Argon2::default().hash_password(secret.as_bytes()) {
-                Ok(hashed_secret) => {
-                    secret = hashed_secret.to_string()
-                }
-                Err(error) => {
-                    log::error!("Error hashing password for user [{}]: {}", name, error);
-                    return Template::render(LOR, context! { ction: "register", error_text: "internal error"});
-                }
+    if db::read_user_by_name(&db, data.name.clone()).await.is_ok() {
+        return Template::render(
+            LOR,
+            context! {
+                action: "register",
+                error_text: "username taken"
             }
+        );
+    }
+    let UserFormInfo { name, mut secret } = data.into_inner();
+    #[cfg(feature = "secure")]
+    match Argon2::default().hash_password(secret.as_bytes()) {
+        Ok(hashed_secret) => {
+            secret = hashed_secret.to_string()
         }
-        let user = db::User {
-            id: 0,
-            name,
-            secret,
-            points: 100,
-            admin: false,
-        };
-        let result = db::write_user(&db, user).await;
-        if result.is_err() {
-            #[cfg(feature = "secure")] log::error!("Error storing user.");
-            Template::render(INDEX, context! { error_text: "internal error" })
-        } else {
-            Template::render(INDEX, ())
+        Err(error) => {
+            log::error!("Error hashing password for user [{}]: {}", name, error);
+            return Template::render(
+                LOR,
+                context! {
+                    action: "register",
+                    error_text: "internal error"
+                }
+            );
         }
+    }
+    let user = db::User {
+        id: 0,
+        name,
+        secret,
+        points: 100,
+        admin: false,
+    };
+    let result = db::write_user(&db, user).await;
+    if result.is_err() {
+        #[cfg(feature = "secure")] log::error!("Error storing user.");
+        Template::render(
+            INDEX,
+            context! { error_text: "internal error" }
+        )
     } else {
-        Template::render(LOR, context! { action: "register", error_text: "username taken" })
+        Template::render(INDEX, ())
     }
 }
 
+#[derive(FromForm)]
+struct MoveFormInfo {
+    receiver: String,
+    amount: String,
+    message: String,
+}
+
 #[get("/send")]
-async fn send() -> Template {
-    todo!()
+async fn send_get(
+    db: Db,
+    cookies: &CookieJar<'_>,
+    sessions: &State<Sessions>,
+    cache: &State<Cache>
+) -> Template {
+    if let Some(user) = fetch_and_cache_user(&db, cookies, sessions, cache).await {
+        Template::render(SEND, context!{ user: user })
+    } else {
+        Template::render(INDEX, context!{ error_text: "login first" })
+    }
+}
+
+#[post("/send", data="<data>")]
+async fn send_post(
+    data: Form<MoveFormInfo>,
+    db: Db,
+    cookies: &CookieJar<'_>,
+    sessions: &State<Sessions>,
+    cache: &State<Cache>
+) -> Template {
+    let user_op = fetch_and_cache_user(&db, cookies, sessions, cache).await;
+    if user_op.is_none() {
+        return Template::render(INDEX, context!{ error_text: "login first" });
+    }
+    let mut user = user_op.unwrap();
+
+    let MoveFormInfo { receiver, amount, message } = data.into_inner();
+    let amount: i64 = match amount.parse() {
+        Ok(value) => value,
+        Err(error) => {
+            return Template::render(SEND, context!{ user: user, error_text: "amount must be a positive integer" });
+        }
+    };
+    if amount < 0 {
+        return Template::render(SEND, context!{ user: user, error_text: "amount must be positive" });
+    }
+    if user.points < amount {
+        return Template::render(SEND, context!{ user: user, error_text: "not enough points" });
+    }
+
+    let receiver_op = db::read_user_by_name(&db, receiver).await;
+    if receiver_op.is_err() {
+        return Template::render(SEND, context!{ user: user, error_text: "receiver does not exist" });
+    }
+    let receiver = receiver_op.unwrap();
+
+    let move_instance = Move {
+        id: 0,
+        sender: user.id,
+        receiver: receiver.id,
+        amount,
+        message,
+        date: db::seconds_from_unix_epoch(),
+        status: db::MoveStatus::New,
+    };
+    
+    let new_points = user.points - amount;
+    let transaction_result = db::create_move(&db, user.id, new_points, move_instance).await;
+    if transaction_result.is_err() {
+        log::error!("{}", transaction_result.err().unwrap());
+        return Template::render(SEND, context!{ user: user, error_text: "internal error" });
+    }
+
+    user.points = new_points;
+    cache.set_points(user.id, new_points).await;
+
+    Template::render(INDEX, context!{ user: user, error_text: "successfuly sent points" })
 }
 
 #[get("/incoming")]
-async fn incoming() -> Template {
+async fn incoming(
+    db: Db,
+    cookies: &CookieJar<'_>,
+    sessions: &State<Sessions>,
+    cache: &State<Cache>
+) -> Template {
     todo!()
 }
 
 #[get("/outgoing")]
-async fn outgoing() -> Template {
-    todo!()
+async fn outgoing(
+    db: Db,
+    cookies: &CookieJar<'_>,
+    sessions: &State<Sessions>,
+    cache: &State<Cache>
+) -> Template {
+    let user_op = fetch_and_cache_user(&db, cookies, sessions, cache).await;
+    if user_op.is_none() {
+        return Template::render(INDEX, context!{ error_text: "login first" });
+    }
+    let mut user = user_op.unwrap();
+
+    let outgoing_op = db::list_ougoing_moves(&db, user.id).await;
+    if outgoing_op.is_err() {
+        return Template::render(INDEX, context!{ error_text: "internal error" });
+    }
+    let outgoing = outgoing_op.unwrap();
+
+    let users = cache::cache_users_from_moves(&db, cache, &outgoing).await;
+    let records = cache::render_moves(&users, &outgoing);
+
+    Template::render(
+        MOVES,
+        context! {
+            move_type: "outgoing",
+            moves: records,
+            can_cancel: true,
+        }
+    )
 }
 
 #[get("/confirm")]
