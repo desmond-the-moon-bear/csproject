@@ -59,7 +59,7 @@ pub fn time_from_seconds(seconds: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64)
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MoveStatus {
     #[default]
     New,
@@ -117,7 +117,7 @@ pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
                 id integer primary key autoincrement,
                 name varchar not null unique,
                 secret varchar not null,
-                points integer not null,
+                points integer not null check(points >= 0),
                 admin bool not null
             );
 
@@ -138,11 +138,7 @@ pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
 
             // It is guaranteed that a placeholder user is present for the admin to replace.
             if let Ok(admin_password) = std::env::var("ADMIN_PASS") {
-                let insert_admin = format!(
-                    "insert or replace into users values (0, 'admin', '{}', 0, TRUE);",
-                    admin_password
-                );
-                conn.execute(&insert_admin, params![])?;
+                conn.execute("insert or replace into users values (0, 'admin', ?1, 0, TRUE);", params![admin_password])?;
             }
 
             Ok(())
@@ -233,42 +229,35 @@ pub async fn write_user(db: &Db, user: User) -> DefaultDbResult {
     }).await
 }
 
-pub async fn create_move(db: &Db, user_id: i64, new_points: i64, move_instance: Move) -> DefaultDbResult {
-    db.run(move |connection| {
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "update users set points = ?1 where id = ?2;",
-            params![
-                new_points,
-                user_id
-            ]
-        )?;
-        transaction.execute(
-            "insert into moves(sender, receiver, amount, message, date, status) values(?1, ?2, ?3, ?4, ?5, ?6);",
-            params![
-                move_instance.sender,
-                move_instance.receiver,
-                move_instance.amount,
-                move_instance.message,
-                move_instance.date,
-                <i64>::from(move_instance.status),
-            ]
-        )?;
-        transaction.commit()?;
-        Ok(1)
-    }).await
+#[derive(Debug, Error)]
+pub struct DetailedError<'a> {
+    pub reason: &'a str,
+    db_error: Option<DbError>
 }
 
-pub async fn update_move_status(db: &Db, move_id: i64, status: MoveStatus) -> DefaultDbResult {
-    db.run(move |connection| {
-        connection.execute(
-            "update moves set status = ?1 where id = ?2;",
-            params![
-                <i64>::from(status),
-                move_id,
-            ]
-        )
-    }).await
+impl<'a> std::fmt::Display for DetailedError<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, ", self.reason)?;
+        match self.db_error {
+            Some(ref error) => write!(f, "{})", error),
+            None => write!(f, "None)")
+        }
+    }
+}
+
+impl<'a> DetailedError<'a> {
+    fn new(reason: &'a str, db_error: Option<DbError>) -> Self {
+        Self {
+            reason,
+            db_error,
+        }
+    }
+}
+
+#[derive(Debug, Display, Error, From)]
+pub enum TransactionError {
+    Db(DbError),
+    Detailed(DetailedError<'static>)
 }
 
 pub fn parse_row_to_move(row: &rocket_sync_db_pools::rusqlite::Row<'_>) -> Result<Move, DbError> {
@@ -287,10 +276,67 @@ pub fn parse_row_to_move(row: &rocket_sync_db_pools::rusqlite::Row<'_>) -> Resul
     Ok(move_instance)
 }
 
+pub async fn create_move(db: &Db, sender: i64, move_instance: Move) -> Result<(), TransactionError> {
+    db.run(move |connection| {
+        let transaction = connection.transaction()?;
+        let subtract_points_result = transaction.execute(
+            "update users set points = points - ?1 where id = ?2;",
+            params![
+                move_instance.amount,
+                sender
+            ]
+        );
+        match subtract_points_result {
+            Ok(rows) => {
+                if rows != 1 {
+                    Err(DetailedError::new("user does not exist", None))?
+                }
+            }
+            Err(error) => {
+                Err(DetailedError::new("not enough points", Some(error)))?
+            }
+        };
+        transaction.execute(
+            "insert into moves(sender, receiver, amount, message, date, status) values(?1, ?2, ?3, ?4, ?5, ?6);",
+            params![
+                move_instance.sender,
+                move_instance.receiver,
+                move_instance.amount,
+                move_instance.message,
+                move_instance.date,
+                <i64>::from(move_instance.status),
+            ]
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }).await
+}
+
+pub async fn perform_move(db: &Db, move_instance: Move) -> Result<(), TransactionError> {
+    assert!(
+        move_instance.status != MoveStatus::New,
+        "To perform a move it must either be accepted or cancelled."
+    );
+    db.run(move |connection| {
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "update moves set status = ?1 where id = ?2;",
+            params![
+                <i64>::from(move_instance.status),
+                move_instance.id
+            ]
+        )?;
+        if move_instance.status == MoveStatus::Accepted {
+            return Ok(());
+        }
+        Ok(())
+    }).await
+}
+
 pub async fn read_move(db: &Db, move_id: i64) -> Result<Move, DbError> {
     db.run(move |connection| {
         connection.query_row(
-            "select * from moves where move.id = ?1;",
+            "select * from moves where moves.id = ?1;",
             params![move_id],
             parse_row_to_move
         )
@@ -308,7 +354,7 @@ pub async fn list_moves(db: &Db) -> Result<Vec<Move>, DbError> {
     }).await
 }
 
-pub async fn list_ougoing_moves(db: &Db, sender: i64) -> Result<Vec<Move>, DbError> {
+pub async fn list_outgoing_moves(db: &Db, sender: i64) -> Result<Vec<Move>, DbError> {
     db.run(move |connection| -> Result<Vec<Move>, DbError> {
         let moves = connection
             .prepare("select * from moves where moves.sender = ?1 and moves.status = 0;")?

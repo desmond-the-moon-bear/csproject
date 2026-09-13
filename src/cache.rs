@@ -140,18 +140,12 @@ impl Session {
 
 #[derive(Debug, Default)]
 pub struct Cache {
-    pub users: Arc<Mutex<HashMap<i64, User>>>,
+    pub users: Arc<Mutex<HashMap<i64, String>>>,
 }
 
 impl Cache {
-    pub async fn set(&self, user: User) {
-        self.users.lock().await.insert(user.id, user);
-    }
-    
-    pub async fn set_points(&self, user_id: i64, points: i64) {
-        if let Some(user) = self.users.lock().await.get_mut(&user_id) {
-            user.points = points;
-        }
+    pub async fn set(&self, user_id: i64, name: String) {
+        self.users.lock().await.insert(user_id, name);
     }
 }
 
@@ -169,11 +163,11 @@ pub struct MoveRecord<'user, 'm> {
 
 pub const ERROR: &str = "<error>";
 
-pub type Guard<'user> = MutexGuard<'user, HashMap<i64, User>>;
+pub type Guard<'user> = MutexGuard<'user, HashMap<i64, String>>;
 pub async fn cache_users_from_moves<'user>(db: &Db, cache: &'user Cache, moves: &[Move]) -> Guard<'user> {
-    async fn cache_user(db: &Db, users: &mut HashMap<i64, User>, user_id: i64) {
+    async fn cache_user(db: &Db, users: &mut HashMap<i64, String>, user_id: i64) {
         if !users.contains_key(&user_id) && let Ok(user) = db::read_user_by_id(db, user_id).await {
-            users.insert(user_id, user);
+            users.insert(user_id, user.name);
         }
     }
     let mut users = cache.users.lock().await;
@@ -185,17 +179,17 @@ pub async fn cache_users_from_moves<'user>(db: &Db, cache: &'user Cache, moves: 
 }
 
 pub fn render_moves<'g, 'm>(
-    users: &'g HashMap<i64, User>,
+    users: &'g HashMap<i64, String>,
     moves: &'m [Move],
 ) -> Vec<MoveRecord<'g, 'm>> {
     let mut result = vec![];
     for move_instance in moves {
         let sender = match users.get(&move_instance.sender) {
-            Some(user) => &user.name,
+            Some(name) => &name,
             None => ERROR,
         };
         let receiver = match users.get(&move_instance.receiver) {
-            Some(user) => &user.name,
+            Some(name) => &name,
             None => ERROR,
         };
 

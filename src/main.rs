@@ -2,7 +2,7 @@
 mod db;
 mod cache;
 
-use db::{Db, User, Move};
+use db::{Db, User, Move, MoveStatus};
 use cache::{Cache, Sessions, Id, ZERO_ID};
 
 use argon2::{
@@ -37,11 +37,10 @@ fn rocket() -> _ {
                 login_get, login_post,
                 register_get, register_post,
                 send_get, send_post,
-                incoming, outgoing,
-                confirm, cancel,
-                admin,
+                change_move, admin,
             ],
-        );
+        )
+        .mount("/moves", routes![list_moves]);
     #[cfg(feature = "secure")]
     {
         rocket = rocket.attach(cache::Timeout);
@@ -77,15 +76,9 @@ async fn fetch_and_cache_user(
 ) -> Option<User> {
     let session_id = get_session_id(cookies)?;
     let user_id = sessions.fetch(session_id).await?;
-    let users = cache.users.lock().await;
-    let cached_user_op = users.get(&user_id);
-    if let Some(cached_user) = cached_user_op {
-        return Some(cached_user.clone());
-    }
     match db::read_user_by_id(db, user_id).await {
         Ok(user_from_db) => {
-            drop(users);
-            cache.set(user_from_db.clone()).await;
+            cache.set(user_id, user_from_db.name.clone()).await;
             Some(user_from_db)
         },
         Err(error) => {
@@ -140,7 +133,7 @@ async fn login_post(
             let cookie = sessions.create(user.id).await;
             cookies.add(cookie);
             let template = Template::render(INDEX, context! { user: &user });
-            cache.set(user);
+            cache.set(user.id, user.name);
             template
         }
         Err(error) => {
@@ -253,9 +246,6 @@ async fn send_post(
     if amount < 0 {
         return Template::render(SEND, context!{ user: user, error_text: "amount must be positive" });
     }
-    if user.points < amount {
-        return Template::render(SEND, context!{ user: user, error_text: "not enough points" });
-    }
 
     let receiver_op = db::read_user_by_name(&db, receiver).await;
     if receiver_op.is_err() {
@@ -273,32 +263,29 @@ async fn send_post(
         status: db::MoveStatus::New,
     };
     
-    let new_points = user.points - amount;
-    let transaction_result = db::create_move(&db, user.id, new_points, move_instance).await;
-    if transaction_result.is_err() {
-        log::error!("{}", transaction_result.err().unwrap());
-        return Template::render(SEND, context!{ user: user, error_text: "internal error" });
+    let transaction_result = db::create_move(&db, user.id, move_instance).await;
+    if let Err(error) = transaction_result {
+        log::error!("{}", error);
+        let error_text = match error {
+            db::TransactionError::Db(error) => "internal error",
+            db::TransactionError::Detailed(detailed_error) => detailed_error.reason,
+        };
+        return Template::render(SEND, context!{ user: user, error_text: error_text });
     }
 
-    user.points = new_points;
-    cache.set_points(user.id, new_points).await;
+    user.points -= amount;
 
     Template::render(INDEX, context!{ user: user, error_text: "successfuly sent points" })
 }
 
-#[get("/incoming")]
-async fn incoming(
-    db: Db,
-    cookies: &CookieJar<'_>,
-    sessions: &State<Sessions>,
-    cache: &State<Cache>
-) -> Template {
-    todo!()
-}
+const MOVES_INCOMING: &str = "incoming";
+const MOVES_OUTGOING: &str = "outgoing";
+const MOVES_PAST: &str = "past";
 
-#[get("/outgoing")]
-async fn outgoing(
+#[get("/moves/<direction>")]
+async fn list_moves(
     db: Db,
+    direction: &str,
     cookies: &CookieJar<'_>,
     sessions: &State<Sessions>,
     cache: &State<Cache>
@@ -307,35 +294,132 @@ async fn outgoing(
     if user_op.is_none() {
         return Template::render(INDEX, context!{ error_text: "login first" });
     }
-    let mut user = user_op.unwrap();
+    let user = user_op.unwrap();
+    render_moves(db, user.id, direction, cookies, cache, None).await
+}
 
-    let outgoing_op = db::list_ougoing_moves(&db, user.id).await;
-    if outgoing_op.is_err() {
+const ACTION_ACCEPT: &str = "accept";
+const ACTION_CANCEL: &str = "cancel";
+
+#[get("/<action>/<direction>/<move_id>")]
+async fn change_move(
+    db: Db,
+    action: &str,
+    direction: &str,
+    move_id: i64,
+    cookies: &CookieJar<'_>,
+    sessions: &State<Sessions>,
+    cache: &State<Cache>
+) -> Template {
+    match direction {
+        MOVES_INCOMING | MOVES_OUTGOING => (),
+        _ => { return Template::render(
+            INDEX,
+            context! {
+                error_text: format!("'{}' is not a valid move type", direction)
+            });
+        }
+    };
+
+    let new_move_status = match action {
+        ACTION_ACCEPT => MoveStatus::Accepted,
+        ACTION_CANCEL => MoveStatus::Cancelled,
+        _ => { return Template::render(INDEX, context!{ error_text: "invalid move operation" }); }
+    };
+
+    let user_op = fetch_and_cache_user(&db, cookies, sessions, cache).await;
+    if user_op.is_none() {
+        return Template::render(INDEX, context!{ error_text: "login first" });
+    }
+    let user = user_op.unwrap();
+
+    let mut move_instance = match db::read_move(&db, move_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            log::error!("Move error: {}.", error);
+            return Template::render(INDEX, context!{ error_text: "move does not exist" });
+        }
+    };
+
+    if move_instance.status != MoveStatus::New {
+        return Template::render(INDEX, context!{ error_text: "login first" });
+    }
+
+    if new_move_status == MoveStatus::Accepted
+        && move_instance.receiver != user.id
+    {
+        return Template::render(INDEX, context!{ error_text: "cannot accept someone else's move" });
+    }
+    if new_move_status == MoveStatus::Cancelled
+        && move_instance.sender != user.id
+        && move_instance.receiver != user.id
+    {
+        return Template::render(INDEX, context!{ error_text: "cannot cancel a move you are not part of" });
+    }
+
+    move_instance.status = new_move_status;
+    let result = db::perform_move(&db, move_instance).await;
+
+    let error_text = if let Err(error) = result {
+        log::error!("{}", error);
+        if let db::TransactionError::Detailed(error) = error {
+            Some(error.reason)
+        } else {
+            Some("internal error")
+        }
+    } else {
+        None
+    };
+
+    render_moves(db, user.id, direction, cookies, cache, error_text).await
+}
+
+async fn render_moves(
+    db: Db,
+    user_id: i64,
+    direction: &str,
+    cookies: &CookieJar<'_>,
+    cache: &State<Cache>,
+    error_text: Option<&'static str>,
+) -> Template {
+    let moves_op = match direction {
+        MOVES_INCOMING => db::list_incoming_moves(&db, user_id).await,
+        MOVES_OUTGOING => db::list_outgoing_moves(&db, user_id).await,
+        // MOVES_PAST => db::list_moves(&db).await,
+        _ => { return Template::render(
+            INDEX,
+            context! {
+                error_text: format!("'{}' is not a valid move type", direction)
+            });
+        }
+    };
+    if let Err(error) = moves_op {
+        log::error!("{}", error);
         return Template::render(INDEX, context!{ error_text: "internal error" });
     }
-    let outgoing = outgoing_op.unwrap();
+    let moves = moves_op.unwrap();
 
-    let users = cache::cache_users_from_moves(&db, cache, &outgoing).await;
-    let records = cache::render_moves(&users, &outgoing);
+    let users = cache::cache_users_from_moves(&db, cache, &moves).await;
+    let records = cache::render_moves(&users, &moves);
+
+    let (can_cancel, can_accept, show_status) = match direction {
+        MOVES_INCOMING => (true, true, false),
+        MOVES_OUTGOING => (true, false, false),
+        MOVES_PAST => (false, false, true),
+        _ => { unreachable!() }
+    };
 
     Template::render(
         MOVES,
         context! {
-            move_type: "outgoing",
+            move_type: direction,
             moves: records,
-            can_cancel: true,
+            can_cancel: can_cancel,
+            can_accept: can_accept,
+            show_status: show_status,
+            error_text: error_text,
         }
     )
-}
-
-#[get("/confirm")]
-async fn confirm() -> Template {
-    todo!()
-}
-
-#[get("/cancel")]
-async fn cancel() -> Template {
-    todo!()
 }
 
 #[get("/admin")]
