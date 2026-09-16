@@ -107,6 +107,18 @@ a:hover {
     background-color: #111111;
 }
 
+table {
+    width: 100%;
+    table-layout: fixed;
+}
+
+td {
+    word-wrap: break-word;
+    text-align: center;
+}
+
 table, th, td {
     border: 1px solid;
+    border-color: #000;
 }
+

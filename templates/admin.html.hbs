@@ -8,7 +8,7 @@
 
     <body>
         <header>
-            <h1 class="hN"> {{move_type}} point moves </h1>
+            <h1 class="hN"> admin </h1>
             <hr>
             <a href="/">home</a>
             <hr>
@@ -38,18 +38,17 @@
                         <td>{{amount}}</td>
                         <td>{{message}}</td>
                         <td>{{date}}</td>
-                        {{#if ../show_status}}
-                            <td>{{status}}</td>
-                        {{/if}}
-                        {{#if ../can_accept}}
+                        <td>{{status}}</td>
+                        {{#if editable}}
                             <td>
-                                <a href="/update/accept/{{../move_type}}/{{id}}">accept</a>
+                                <a href="/update/accept/admin/{{id}}">accept</a>
                             </td>
-                        {{/if}}
-                        {{#if ../can_cancel}}
                             <td>
-                                <a href="/update/cancel/{{../move_type}}/{{id}}">cancel</a>
+                                <a href="/update/cancel/admin/{{id}}">cancel</a>
                             </td>
+                        {{else}}
+                            <td>-</td>
+                            <td>-</td>
                         {{/if}}
                     </tr>
                 {{/each}}

@@ -159,6 +159,7 @@ pub struct MoveRecord<'user, 'm> {
     pub message: &'m String,
     pub date: String,
     pub status: MoveStatus,
+    pub editable: bool,
 }
 
 pub const ERROR: &str = "<error>";
@@ -185,11 +186,11 @@ pub fn render_moves<'g, 'm>(
     let mut result = vec![];
     for move_instance in moves {
         let sender = match users.get(&move_instance.sender) {
-            Some(name) => &name,
+            Some(name) => name,
             None => ERROR,
         };
         let receiver = match users.get(&move_instance.receiver) {
-            Some(name) => &name,
+            Some(name) => name,
             None => ERROR,
         };
 
@@ -204,6 +205,7 @@ pub fn render_moves<'g, 'm>(
             message: &move_instance.message,
             date,
             status: move_instance.status,
+            editable: move_instance.status == MoveStatus::New,
         });
     }
     result

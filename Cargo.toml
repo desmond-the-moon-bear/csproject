@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 smol = { version = "2.0.2" }
-env_logger = { version = "0.11.11" }
+simplelog = { version = "0.12.2" }
 log = { version = "0.4.34" }
+# env_logger = { version = "0.11.11" }
 rand = { version = "0.10.2", features = ["sys_rng", "std_rng"] }
 base64 = { version = "0.23.1" }
 argon2 = { version = "0.6.0", features = ["getrandom"] }

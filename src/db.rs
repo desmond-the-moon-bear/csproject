@@ -33,7 +33,6 @@ pub struct User {
     #[serde(skip_serializing)]
     pub secret: String,
     pub points: i64,
-    #[serde(skip_serializing)]
     pub admin: bool,
 }
 
@@ -92,7 +91,14 @@ impl Serialize for MoveStatus {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: rocket::serde::Serializer {
-        serializer.serialize_u8(<i64>::from(*self) as u8)
+        // serializer.serialize_u8(<i64>::from(*self) as u8)
+        serializer.serialize_str(
+            match self {
+                MoveStatus::New => "pending",
+                MoveStatus::Accepted => "accepted",
+                MoveStatus::Cancelled => "cancelled",
+            }
+        )
     }
 }
 
@@ -137,8 +143,24 @@ pub async fn init_db(rocket: Rocket<Build>) -> Rocket<Build> {
             "#)?;
 
             // It is guaranteed that a placeholder user is present for the admin to replace.
-            if let Ok(admin_password) = std::env::var("ADMIN_PASS") {
-                conn.execute("insert or replace into users values (0, 'admin', ?1, 0, TRUE);", params![admin_password])?;
+            'label: {
+                if let Ok(admin_password) = std::env::var("ADMIN_PASS") {
+                    #[cfg(feature = "secure")]
+                    let admin_password = match Argon2::default().hash_password(admin_password.as_bytes()) {
+                        Ok(password) => {
+                            password.to_string()
+                        }
+                        Err(error) => {
+                            log::error!("Error hashing admin password: {}.", error);
+                            break 'label;
+                        }
+                    };
+
+                    conn.execute(
+                        "insert or replace into users values (0, 'admin', ?1, 0, TRUE);",
+                        params![admin_password]
+                    )?;
+                }
             }
 
             Ok(())
@@ -208,7 +230,7 @@ pub async fn verify_secret(
     let user = db.run(move |connection| {
         connection.query_row(
             &query,
-            params![],
+            [],
             parse_row_to_user,
         )
     }).await?;
@@ -327,8 +349,18 @@ pub async fn perform_move(db: &Db, move_instance: Move) -> Result<(), Transactio
             ]
         )?;
         if move_instance.status == MoveStatus::Accepted {
-            return Ok(());
+            transaction.execute(
+                "update users set points = points + ?1 where id = ?2;",
+                params![move_instance.amount, move_instance.receiver]
+            )?;
+        } else {
+            // move_instance.status == MoveStatus::Cancelled
+            transaction.execute(
+                "update users set points = points + ?1 where id = ?2;",
+                params![move_instance.amount, move_instance.sender]
+            )?;
         }
+        transaction.commit()?;
         Ok(())
     }).await
 }
@@ -347,7 +379,7 @@ pub async fn list_moves(db: &Db) -> Result<Vec<Move>, DbError> {
     db.run(|connection| -> Result<Vec<Move>, DbError> {
         let moves = connection
             .prepare("select * from moves;")?
-            .query_map(params![], parse_row_to_move)?
+            .query_map([], parse_row_to_move)?
             .flatten()
             .collect::<Vec<_>>();
         Ok(moves)
@@ -357,8 +389,8 @@ pub async fn list_moves(db: &Db) -> Result<Vec<Move>, DbError> {
 pub async fn list_outgoing_moves(db: &Db, sender: i64) -> Result<Vec<Move>, DbError> {
     db.run(move |connection| -> Result<Vec<Move>, DbError> {
         let moves = connection
-            .prepare("select * from moves where moves.sender = ?1 and moves.status = 0;")?
-            .query_map(params![sender], parse_row_to_move)?
+            .prepare("select * from moves where moves.sender = ?1 and moves.status = ?2;")?
+            .query_map(params![sender, <i64>::from(MoveStatus::New)], parse_row_to_move)?
             .flatten()
             .collect::<Vec<_>>();
         Ok(moves)
@@ -368,8 +400,23 @@ pub async fn list_outgoing_moves(db: &Db, sender: i64) -> Result<Vec<Move>, DbEr
 pub async fn list_incoming_moves(db: &Db, receiver: i64) -> Result<Vec<Move>, DbError> {
     db.run(move |connection| -> Result<Vec<Move>, DbError> {
         let moves = connection
-            .prepare("select * from moves where moves.receiver = ?1 and moves.status = 0;")?
-            .query_map(params![receiver], parse_row_to_move)?
+            .prepare("select * from moves where moves.receiver = ?1 and moves.status = ?2;")?
+            .query_map(params![receiver, <i64>::from(MoveStatus::New)], parse_row_to_move)?
+            .flatten()
+            .collect::<Vec<_>>();
+        Ok(moves)
+    }).await
+}
+
+pub async fn list_past_moves(db: &Db, user_id: i64) -> Result<Vec<Move>, DbError> {
+    db.run(move |connection| -> Result<Vec<Move>, DbError> {
+        let moves = connection
+            .prepare(r#"
+                select * from moves where
+                    (moves.receiver = ?1 or moves.sender = ?1)
+                    and moves.status != ?2;
+            "#)?
+            .query_map(params![user_id, <i64>::from(MoveStatus::New)], parse_row_to_move)?
             .flatten()
             .collect::<Vec<_>>();
         Ok(moves)

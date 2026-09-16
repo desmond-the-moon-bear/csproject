@@ -5,12 +5,16 @@ mod cache;
 use db::{Db, User, Move, MoveStatus};
 use cache::{Cache, Sessions, Id, ZERO_ID};
 
+use std::net::IpAddr;
+
 use argon2::{
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
     Argon2
 };
 
 use base64::prelude::*;
+
+use chrono::{DateTime, Local};
 
 use rocket::fairing::AdHoc;
 use rocket::{FromForm, form::Form};
@@ -23,6 +27,22 @@ use rocket_dyn_templates::{Template, context};
 
 #[launch]
 fn rocket() -> _ {
+    #[cfg(feature = "secure")]
+    {
+        use std::fs::File;
+        use std::time::SystemTime;
+        use simplelog::{WriteLogger, LevelFilter, Config};
+
+        // Log to file to allow for "delaied forensic analysis".
+        let now = DateTime::<Local>::from(SystemTime::now()).format("%Y%m%d-%H%M%S");
+        let log_path = format!("./data/{}.log", now);
+        WriteLogger::init(
+            LevelFilter::Info,
+            Config::default(),
+            File::create_new(log_path).unwrap()
+        ).unwrap();
+    }
+
     let mut rocket = rocket::build()
         .attach(Template::fairing())
         .attach(Db::fairing())
@@ -36,24 +56,30 @@ fn rocket() -> _ {
                 index,
                 login_get, login_post,
                 register_get, register_post,
+                logout,
                 send_get, send_post,
-                change_move, admin,
+                moves, update, admin,
             ],
-        )
-        .mount("/moves", routes![list_moves]);
+        );
     #[cfg(feature = "secure")]
     {
         rocket = rocket.attach(cache::Timeout);
     }
+    #[cfg(not(feature = "secure"))]
+    {
+        rocket = rocket.mount("/", routes![debug]);
+    }
     rocket
 }
 
-const INDEX: &str = "index";
-const LOR: &str = "login_or_register";
-const MOVES: &str = "move_view";
-const SEND: &str = "create_move";
+const INDEX : &str = "index";
+const LOR   : &str = "login_or_register";
+const MOVES : &str = "move_view";
+const SEND  : &str = "create_move";
+const ADMIN : &str = "admin";
 
-fn get_session_id(cookies: &CookieJar<'_>) -> Option<Id> {
+fn get_session_id(ip: IpAddr, cookies: &CookieJar<'_>) -> Option<Id> {
+    // It's ok if the cookie does not exist. No logging needed.
     let encoded_id = cookies.get(cache::SESSION_COOKIE_NAME)?.value();
     let mut id = ZERO_ID;
     match BASE64_URL_SAFE.decode_slice(encoded_id, &mut id) {
@@ -61,7 +87,8 @@ fn get_session_id(cookies: &CookieJar<'_>) -> Option<Id> {
             Some(id)
         }
         Err(error) => {
-            #[cfg(feature = "secure")] log::info!("Error decoding cookie: {}.", error);
+            #[cfg(feature = "secure")]
+            log::warn!("[from: {}] Error decoding cookie: {}.", ip, error);
             cookies.remove(cache::SESSION_COOKIE_NAME);
             None
         }
@@ -69,13 +96,21 @@ fn get_session_id(cookies: &CookieJar<'_>) -> Option<Id> {
 }
 
 async fn fetch_and_cache_user(
+    ip: IpAddr,
     db: &Db,
     cookies: &CookieJar<'_>,
     sessions: &State<Sessions>,
     cache: &State<Cache>
 ) -> Option<User> {
-    let session_id = get_session_id(cookies)?;
-    let user_id = sessions.fetch(session_id).await?;
+    let session_id = get_session_id(ip, cookies)?;
+    let user_id = match sessions.fetch(session_id).await {
+        Some(value) => value,
+        None => {
+            #[cfg(feature = "secure")]
+            log::warn!("[from: {}] Session from cookie did not exist: {:?}.", ip, session_id);
+            return None;
+        }
+    };
     match db::read_user_by_id(db, user_id).await {
         Ok(user_from_db) => {
             cache.set(user_id, user_from_db.name.clone()).await;
@@ -83,7 +118,7 @@ async fn fetch_and_cache_user(
         },
         Err(error) => {
             #[cfg(feature = "secure")]
-            log::info!("Error fetching user from database: {}.", error);
+            log::error!("[from: {}] Error fetching user from database: {}.", ip, error);
             None
         }
     }
@@ -91,12 +126,13 @@ async fn fetch_and_cache_user(
 
 #[get("/")]
 async fn index(
+    ip: IpAddr,
     db: Db,
     cookies: &CookieJar<'_>,
     sessions: &State<Sessions>,
     cache: &State<Cache>,
 ) -> Template {
-    if let Some(user) = fetch_and_cache_user(&db, cookies, sessions, cache).await {
+    if let Some(user) = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await {
         Template::render(INDEX, context! { user: user })
     } else {
         Template::render(INDEX, ())
@@ -116,6 +152,7 @@ async fn login_get() -> Template {
 
 #[post("/login", data="<data>")]
 async fn login_post(
+    ip: IpAddr,
     data: Form<UserFormInfo>,
     db: Db,
     cookies: &CookieJar<'_>,
@@ -127,9 +164,11 @@ async fn login_post(
     match result {
         Ok(user) => {
             #[cfg(feature = "secure")]
-            if let Some(previous_session_id) = get_session_id(cookies) {
+            if let Some(previous_session_id) = get_session_id(ip, cookies) {
                 sessions.drop(previous_session_id);
             }
+            #[cfg(feature = "secure")]
+            log::info!("[from: {}] User {} logged in.", ip, user.id);
             let cookie = sessions.create(user.id).await;
             cookies.add(cookie);
             let template = Template::render(INDEX, context! { user: &user });
@@ -138,7 +177,7 @@ async fn login_post(
         }
         Err(error) => {
             #[cfg(feature = "secure")]
-            log::error!("Failed to authenticate user: {}.", error);
+            log::error!("[from: {}] Failed to authenticate user: {}.", ip, error);
             use db::VerificationError::*;
             let error_text = match error {
                 Db(_) => "user does not exist",
@@ -149,14 +188,46 @@ async fn login_post(
     }
 }
 
+#[get("/logout")]
+async fn logout(
+    ip: IpAddr,
+    db: Db,
+    cookies: &CookieJar<'_>,
+    sessions: &State<Sessions>,
+    cache: &State<Cache>
+) -> Template {
+    let session_id_op = get_session_id(ip, cookies);
+    #[cfg(not(feature = "secure"))]
+    if session_id_op.is_some() {
+        cookies.remove(cache::SESSION_COOKIE_NAME);
+    }
+    #[cfg(feature = "secure")]
+    if let Some(session_id) = session_id_op {
+        cookies.remove(cache::SESSION_COOKIE_NAME);
+        if let Some(user_id) = sessions.fetch(session_id).await {
+            log::info!("[from: {}] User {} logged out.", ip, user_id);
+        } else {
+            log::warn!("[from: {}] Tried to log out with an inactive session.", ip);
+        }
+        sessions.drop(session_id).await;
+    } else {
+        log::warn!("[from: {}] Tried to log out with invalid session.", ip);
+    }
+    Template::render(INDEX, ())
+}
+
+const MAX_NAME_LEN: usize = 75;
+
 #[get("/register")]
 async fn register_get() -> Template {
     Template::render(LOR, context!{ action: "register" })
 }
 
 #[post("/register", data="<data>")]
-async fn register_post(data: Form<UserFormInfo>, db: Db) -> Template {
+async fn register_post(ip: IpAddr, data: Form<UserFormInfo>, db: Db) -> Template {
     if db::read_user_by_name(&db, data.name.clone()).await.is_ok() {
+        #[cfg(feature = "secure")]
+        log::warn!("[from: {}] Tried to create an account an already existing username: {}.", ip, data.name);
         return Template::render(
             LOR,
             context! {
@@ -165,14 +236,27 @@ async fn register_post(data: Form<UserFormInfo>, db: Db) -> Template {
             }
         );
     }
+
     let UserFormInfo { name, mut secret } = data.into_inner();
+    if name.chars().count() > MAX_NAME_LEN {
+        #[cfg(feature = "secure")]
+        log::error!("[from: {}] Name was too long: {}", ip, name);
+        return Template::render(
+            LOR,
+            context! {
+                action: "register",
+                error_text: "name was too long"
+            }
+        );
+    }
+
     #[cfg(feature = "secure")]
     match Argon2::default().hash_password(secret.as_bytes()) {
         Ok(hashed_secret) => {
             secret = hashed_secret.to_string()
         }
         Err(error) => {
-            log::error!("Error hashing password for user [{}]: {}", name, error);
+            log::error!("[from: {}] Error hashing password for user [{}]: {}", ip, name, error);
             return Template::render(
                 LOR,
                 context! {
@@ -189,9 +273,11 @@ async fn register_post(data: Form<UserFormInfo>, db: Db) -> Template {
         points: 100,
         admin: false,
     };
+    #[cfg(feature = "secure")]
     let result = db::write_user(&db, user).await;
-    if result.is_err() {
-        #[cfg(feature = "secure")] log::error!("Error storing user.");
+    if let Err(error) = result {
+        #[cfg(feature = "secure")]
+        log::error!("[from: {}] Error storing user: {}.", ip, error);
         Template::render(
             INDEX,
             context! { error_text: "internal error" }
@@ -208,50 +294,69 @@ struct MoveFormInfo {
     message: String,
 }
 
+const MAX_MESSAGE_LEN: usize = 512;
+
 #[get("/send")]
 async fn send_get(
+    ip: IpAddr,
     db: Db,
     cookies: &CookieJar<'_>,
     sessions: &State<Sessions>,
     cache: &State<Cache>
 ) -> Template {
-    if let Some(user) = fetch_and_cache_user(&db, cookies, sessions, cache).await {
+    if let Some(user) = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await {
         Template::render(SEND, context!{ user: user })
     } else {
+        #[cfg(feature = "secure")]
+        log::warn!("[from: {}] Tried to send without logging in first.", ip);
         Template::render(INDEX, context!{ error_text: "login first" })
     }
 }
 
 #[post("/send", data="<data>")]
 async fn send_post(
+    ip: IpAddr,
     data: Form<MoveFormInfo>,
     db: Db,
     cookies: &CookieJar<'_>,
     sessions: &State<Sessions>,
     cache: &State<Cache>
 ) -> Template {
-    let user_op = fetch_and_cache_user(&db, cookies, sessions, cache).await;
+    let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
     if user_op.is_none() {
         return Template::render(INDEX, context!{ error_text: "login first" });
     }
     let mut user = user_op.unwrap();
 
-    let MoveFormInfo { receiver, amount, message } = data.into_inner();
+    let MoveFormInfo { receiver, amount, mut message } = data.into_inner();
+    message = message.chars().take(MAX_MESSAGE_LEN).collect();
     let amount: i64 = match amount.parse() {
         Ok(value) => value,
         Err(error) => {
+            #[cfg(feature = "secure")]
+            log::warn!("[from: {}] Invalid amount passed: {}.", ip, amount);
             return Template::render(SEND, context!{ user: user, error_text: "amount must be a positive integer" });
         }
     };
     if amount < 0 {
+        #[cfg(feature = "secure")]
+        log::warn!("[from: {}] Invalid amount passed: {}.", ip, amount);
         return Template::render(SEND, context!{ user: user, error_text: "amount must be positive" });
     }
 
     let receiver_op = db::read_user_by_name(&db, receiver).await;
-    if receiver_op.is_err() {
+    if let Err(error) = receiver_op {
+        #[cfg(feature = "secure")]
+        log::warn!("[from: {}] Could not fetch receiver from db: {}.", ip, error);
         return Template::render(SEND, context!{ user: user, error_text: "receiver does not exist" });
     }
     let receiver = receiver_op.unwrap();
+
+    if user.id == receiver.id {
+        #[cfg(feature = "secure")]
+        log::warn!("[from: {}] User tried to send points to self.", ip);
+        return Template::render(SEND, context!{ user: user, error_text: "cannot send points to self" });
+    }
 
     let move_instance = Move {
         id: 0,
@@ -265,7 +370,8 @@ async fn send_post(
     
     let transaction_result = db::create_move(&db, user.id, move_instance).await;
     if let Err(error) = transaction_result {
-        log::error!("{}", error);
+        #[cfg(feature = "secure")]
+        log::error!("[from: {}] Error creating move: {}.", ip, error);
         let error_text = match error {
             db::TransactionError::Db(error) => "internal error",
             db::TransactionError::Detailed(detailed_error) => detailed_error.reason,
@@ -281,28 +387,32 @@ async fn send_post(
 const MOVES_INCOMING: &str = "incoming";
 const MOVES_OUTGOING: &str = "outgoing";
 const MOVES_PAST: &str = "past";
+const MOVES_ADMIN_VIEW: &str = "admin";
 
 #[get("/moves/<direction>")]
-async fn list_moves(
+async fn moves(
+    ip: IpAddr,
     db: Db,
     direction: &str,
     cookies: &CookieJar<'_>,
     sessions: &State<Sessions>,
     cache: &State<Cache>
 ) -> Template {
-    let user_op = fetch_and_cache_user(&db, cookies, sessions, cache).await;
+    let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
     if user_op.is_none() {
         return Template::render(INDEX, context!{ error_text: "login first" });
     }
     let user = user_op.unwrap();
-    render_moves(db, user.id, direction, cookies, cache, None).await
+    render_moves(ip, db, user.id, direction, MOVES, cookies, cache, None).await
 }
 
 const ACTION_ACCEPT: &str = "accept";
 const ACTION_CANCEL: &str = "cancel";
 
-#[get("/<action>/<direction>/<move_id>")]
-async fn change_move(
+#[allow(clippy::too_many_arguments)]
+#[get("/update/<action>/<direction>/<move_id>")]
+async fn update(
+    ip: IpAddr,
     db: Db,
     action: &str,
     direction: &str,
@@ -311,57 +421,91 @@ async fn change_move(
     sessions: &State<Sessions>,
     cache: &State<Cache>
 ) -> Template {
+    let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
+    if user_op.is_none() {
+        #[cfg(feature = "secure")]
+        log::warn!("[from: {}] Tried to update move without logging in first.", ip);
+        return Template::render(INDEX, context!{ error_text: "login first" });
+    }
+    let user = user_op.unwrap();
+
     match direction {
-        MOVES_INCOMING | MOVES_OUTGOING => (),
-        _ => { return Template::render(
-            INDEX,
-            context! {
-                error_text: format!("'{}' is not a valid move type", direction)
-            });
+        MOVES_INCOMING | MOVES_OUTGOING  => (),
+        MOVES_ADMIN_VIEW => {
+            #[cfg(feature = "secure")]
+            if !user.admin {
+                log::warn!("[from: {}] Tried to update move without being an admin.", ip);
+                return Template::render(INDEX, context!{ error_text: "not an admin" });
+            }
+        }
+        _ => {
+            #[cfg(feature = "secure")]
+            log::error!("[from: {}] Invalid move type: {}.", ip, direction);
+            return Template::render(
+                INDEX,
+                context! {
+                    error_text: format!("'{}' is not a valid move type", direction)
+                }
+            );
         }
     };
 
     let new_move_status = match action {
         ACTION_ACCEPT => MoveStatus::Accepted,
         ACTION_CANCEL => MoveStatus::Cancelled,
-        _ => { return Template::render(INDEX, context!{ error_text: "invalid move operation" }); }
+        _ => {
+            #[cfg(feature = "secure")]
+            log::error!("[from: {}] Invalid move operation: {}.", ip, action);
+            return Template::render(INDEX, context!{ error_text: "invalid move operation" });
+        }
     };
-
-    let user_op = fetch_and_cache_user(&db, cookies, sessions, cache).await;
-    if user_op.is_none() {
-        return Template::render(INDEX, context!{ error_text: "login first" });
-    }
-    let user = user_op.unwrap();
 
     let mut move_instance = match db::read_move(&db, move_id).await {
         Ok(value) => value,
         Err(error) => {
-            log::error!("Move error: {}.", error);
+            #[cfg(feature = "secure")]
+            log::error!("[from: {}] Move error: {}.", ip, error);
             return Template::render(INDEX, context!{ error_text: "move does not exist" });
         }
     };
 
     if move_instance.status != MoveStatus::New {
-        return Template::render(INDEX, context!{ error_text: "login first" });
+        #[cfg(feature = "secure")]
+        log::error!("[from: {}] User {} tried to update non-new move.", ip, user.id);
+        return Template::render(INDEX, context!{ error_text: "cannot update a non-new move" });
     }
 
-    if new_move_status == MoveStatus::Accepted
-        && move_instance.receiver != user.id
-    {
-        return Template::render(INDEX, context!{ error_text: "cannot accept someone else's move" });
-    }
-    if new_move_status == MoveStatus::Cancelled
-        && move_instance.sender != user.id
-        && move_instance.receiver != user.id
-    {
-        return Template::render(INDEX, context!{ error_text: "cannot cancel a move you are not part of" });
+    #[cfg(feature = "secure")]
+    if !user.admin {
+        if new_move_status == MoveStatus::Accepted
+            && move_instance.receiver != user.id
+        {
+            #[cfg(feature = "secure")]
+            log::error!("[from: {}] User {} tried to accept an invalid move: {:?}.", ip, user.id, move_instance);
+            return Template::render(INDEX, context!{ error_text: "cannot accept someone else's move" });
+        }
+        if new_move_status == MoveStatus::Cancelled
+            && move_instance.sender != user.id
+            && move_instance.receiver != user.id
+        {
+            #[cfg(feature = "secure")]
+            log::error!("[from: {}] User {} tried to cancel an invalid move: {:?}.", ip, user.id, move_instance);
+            return Template::render(INDEX, context!{ error_text: "cannot cancel a move you are not part of" });
+        }
+    } else {
+        #[cfg(feature = "secure")]
+        log::info!(
+            "[from: {}] Admin {} changes move {:?} to status {:?}.",
+            ip, user.id, move_instance, new_move_status
+        );
     }
 
     move_instance.status = new_move_status;
     let result = db::perform_move(&db, move_instance).await;
 
     let error_text = if let Err(error) = result {
-        log::error!("{}", error);
+        #[cfg(feature = "secure")]
+        log::error!("[from: {}] DB error when updating move: {}.", ip, error);
         if let db::TransactionError::Detailed(error) = error {
             Some(error.reason)
         } else {
@@ -371,13 +515,17 @@ async fn change_move(
         None
     };
 
-    render_moves(db, user.id, direction, cookies, cache, error_text).await
+    let template = if direction == MOVES_ADMIN_VIEW { ADMIN } else { MOVES };
+    render_moves(ip, db, user.id, direction, template, cookies, cache, error_text).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn render_moves(
+    ip: IpAddr,
     db: Db,
     user_id: i64,
     direction: &str,
+    template: &'static str,
     cookies: &CookieJar<'_>,
     cache: &State<Cache>,
     error_text: Option<&'static str>,
@@ -385,12 +533,17 @@ async fn render_moves(
     let moves_op = match direction {
         MOVES_INCOMING => db::list_incoming_moves(&db, user_id).await,
         MOVES_OUTGOING => db::list_outgoing_moves(&db, user_id).await,
-        // MOVES_PAST => db::list_moves(&db).await,
-        _ => { return Template::render(
-            INDEX,
-            context! {
-                error_text: format!("'{}' is not a valid move type", direction)
-            });
+        MOVES_PAST => db::list_past_moves(&db, user_id).await,
+        MOVES_ADMIN_VIEW => db::list_moves(&db).await,
+        _ => {
+            #[cfg(feature = "secure")]
+            log::error!("[from: {}] Invalid move type: {}.", ip, direction);
+            return Template::render(
+                INDEX,
+                context! {
+                    error_text: format!("'{}' is not a valid move type", direction)
+                }
+            );
         }
     };
     if let Err(error) = moves_op {
@@ -406,11 +559,12 @@ async fn render_moves(
         MOVES_INCOMING => (true, true, false),
         MOVES_OUTGOING => (true, false, false),
         MOVES_PAST => (false, false, true),
+        MOVES_ADMIN_VIEW => (true, true, true),
         _ => { unreachable!() }
     };
 
     Template::render(
-        MOVES,
+        template,
         context! {
             move_type: direction,
             moves: records,
@@ -423,6 +577,35 @@ async fn render_moves(
 }
 
 #[get("/admin")]
-async fn admin() -> Template {
-    todo!()
+async fn admin(
+    ip: IpAddr,
+    db: Db,
+    cookies: &CookieJar<'_>,
+    sessions: &State<Sessions>,
+    cache: &State<Cache>
+) -> Template {
+    if let Some(user) = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await {
+        #[cfg(feature = "secure")]
+        if !user.admin {
+            log::warn!("[from: {}] User {} is not an admin.", ip, user.id);
+            return Template::render(INDEX, context! { user: user });
+        }
+        render_moves(ip, db, user.id, MOVES_ADMIN_VIEW, ADMIN, cookies, cache, None).await
+    } else {
+        #[cfg(feature = "secure")]
+        log::warn!("[from: {}] Attempted access to admin panel.", ip);
+        Template::render(INDEX, ())
+    }
+}
+
+#[cfg(not(feature = "secure"))]
+#[get("/debug/<session_id>")]
+async fn debug(session_id: &str, sessions: &State<Sessions>) -> String {
+    let mut session_id = ZERO_ID;
+    if BASE64_URL_SAFE.decode_slice(encoded_id, &mut session_id).is_ok() {
+        if let Some(user_id) = sessions.fetch(session_id) {
+            return format!("the session id belongs to user id: {}", user_id);
+        }
+    }
+    String::from("no active session")
 }
