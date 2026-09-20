@@ -40,7 +40,7 @@ cargo run --no-default-features
 To run the version without the flaws run:
 
 ```sh
-cargo run --no-default-features
+cargo run
 ```
 
 **IMPORTANT**: When testing the flawed version use HTTP in the link in the
