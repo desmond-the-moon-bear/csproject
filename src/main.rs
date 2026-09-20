@@ -27,22 +27,6 @@ use rocket_dyn_templates::{Template, context};
 
 #[launch]
 fn rocket() -> _ {
-    #[cfg(feature = "secure")]
-    {
-        use std::fs::File;
-        use std::time::SystemTime;
-        use simplelog::{WriteLogger, LevelFilter, Config};
-
-        // Log to file to allow for "delaied forensic analysis".
-        let now = DateTime::<Local>::from(SystemTime::now()).format("%Y%m%d-%H%M%S");
-        let log_path = format!("./data/{}.log", now);
-        WriteLogger::init(
-            LevelFilter::Info,
-            Config::default(),
-            File::create_new(log_path).unwrap()
-        ).unwrap();
-    }
-
     let mut rocket = rocket::build()
         .attach(Template::fairing())
         .attach(Db::fairing())
@@ -179,10 +163,13 @@ async fn login_post(
             #[cfg(feature = "secure")]
             log::error!("[from: {}] Failed to authenticate user: {}.", ip, error);
             use db::VerificationError::*;
+            #[cfg(feature = "secure")]
             let error_text = match error {
                 Db(_) => "user does not exist",
                 Phc(_) | Password(_) => "incorrect password",
             };
+            #[cfg(not(feature = "secure"))]
+            let error_text = format!("{:?}", error);
             Template::render(LOR, context! { action: "login", error_text: error_text })
         }
     }
@@ -211,7 +198,7 @@ async fn logout(
         }
         sessions.drop(session_id).await;
     } else {
-        log::warn!("[from: {}] Tried to log out with invalid session.", ip);
+        log::warn!("[from: {}] Tried to log out with invalid (or nonexistant) session from cookie.", ip);
     }
     Template::render(INDEX, ())
 }
@@ -238,14 +225,15 @@ async fn register_post(ip: IpAddr, data: Form<UserFormInfo>, db: Db) -> Template
     }
 
     let UserFormInfo { name, mut secret } = data.into_inner();
-    if name.chars().count() > MAX_NAME_LEN {
+    let name_len = name.chars().count();
+    if name_len > MAX_NAME_LEN {
         #[cfg(feature = "secure")]
         log::error!("[from: {}] Name was too long: {}", ip, name);
         return Template::render(
             LOR,
             context! {
                 action: "register",
-                error_text: "name was too long"
+                error_text: format!("name was too long; max: {} characters, was {}", MAX_NAME_LEN, name_len)
             }
         );
     }
@@ -256,12 +244,13 @@ async fn register_post(ip: IpAddr, data: Form<UserFormInfo>, db: Db) -> Template
             secret = hashed_secret.to_string()
         }
         Err(error) => {
+            #[cfg(feature = "secure")]
             log::error!("[from: {}] Error hashing password for user [{}]: {}", ip, name, error);
             return Template::render(
                 LOR,
                 context! {
                     action: "register",
-                    error_text: "internal error"
+                    error_text: "internal error",
                 }
             );
         }
@@ -273,7 +262,6 @@ async fn register_post(ip: IpAddr, data: Form<UserFormInfo>, db: Db) -> Template
         points: 100,
         admin: false,
     };
-    #[cfg(feature = "secure")]
     let result = db::write_user(&db, user).await;
     if let Err(error) = result {
         #[cfg(feature = "secure")]
@@ -338,8 +326,9 @@ async fn send_post(
             return Template::render(SEND, context!{ user: user, error_text: "amount must be a positive integer" });
         }
     };
+
+    #[cfg(feature = "secure")]
     if amount < 0 {
-        #[cfg(feature = "secure")]
         log::warn!("[from: {}] Invalid amount passed: {}.", ip, amount);
         return Template::render(SEND, context!{ user: user, error_text: "amount must be positive" });
     }
@@ -403,7 +392,7 @@ async fn moves(
         return Template::render(INDEX, context!{ error_text: "login first" });
     }
     let user = user_op.unwrap();
-    render_moves(ip, db, user.id, direction, MOVES, cookies, cache, None).await
+    render_moves(ip, db, Some(user), direction, MOVES, cookies, cache, None).await
 }
 
 const ACTION_ACCEPT: &str = "accept";
@@ -421,19 +410,23 @@ async fn update(
     sessions: &State<Sessions>,
     cache: &State<Cache>
 ) -> Template {
-    let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
-    if user_op.is_none() {
-        #[cfg(feature = "secure")]
-        log::warn!("[from: {}] Tried to update move without logging in first.", ip);
-        return Template::render(INDEX, context!{ error_text: "login first" });
+    let mut user = None;
+    #[cfg(feature = "secure")]
+    {
+        let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
+        if user_op.is_none() {
+            #[cfg(feature = "secure")]
+            log::warn!("[from: {}] Tried to update move without logging in first.", ip);
+            return Template::render(INDEX, context!{ error_text: "login first" });
+        }
+        user = user_op;
     }
-    let user = user_op.unwrap();
 
     match direction {
         MOVES_INCOMING | MOVES_OUTGOING  => (),
         MOVES_ADMIN_VIEW => {
             #[cfg(feature = "secure")]
-            if !user.admin {
+            if !user.as_ref().unwrap().admin {
                 log::warn!("[from: {}] Tried to update move without being an admin.", ip);
                 return Template::render(INDEX, context!{ error_text: "not an admin" });
             }
@@ -471,16 +464,16 @@ async fn update(
 
     if move_instance.status != MoveStatus::New {
         #[cfg(feature = "secure")]
-        log::error!("[from: {}] User {} tried to update non-new move.", ip, user.id);
+        log::error!("[from: {}] Tried to update non-new move (user_id: {:?}).", ip, user.unwrap().id);
         return Template::render(INDEX, context!{ error_text: "cannot update a non-new move" });
     }
 
     #[cfg(feature = "secure")]
-    if !user.admin {
+    if !user.as_ref().unwrap().admin {
+        let user = user.as_ref().unwrap();
         if new_move_status == MoveStatus::Accepted
             && move_instance.receiver != user.id
         {
-            #[cfg(feature = "secure")]
             log::error!("[from: {}] User {} tried to accept an invalid move: {:?}.", ip, user.id, move_instance);
             return Template::render(INDEX, context!{ error_text: "cannot accept someone else's move" });
         }
@@ -488,15 +481,13 @@ async fn update(
             && move_instance.sender != user.id
             && move_instance.receiver != user.id
         {
-            #[cfg(feature = "secure")]
             log::error!("[from: {}] User {} tried to cancel an invalid move: {:?}.", ip, user.id, move_instance);
             return Template::render(INDEX, context!{ error_text: "cannot cancel a move you are not part of" });
         }
     } else {
-        #[cfg(feature = "secure")]
         log::info!(
             "[from: {}] Admin {} changes move {:?} to status {:?}.",
-            ip, user.id, move_instance, new_move_status
+            ip, user.as_ref().unwrap().id, move_instance, new_move_status
         );
     }
 
@@ -512,28 +503,29 @@ async fn update(
             Some("internal error")
         }
     } else {
-        None
+        Some("successfully updated")
     };
 
     let template = if direction == MOVES_ADMIN_VIEW { ADMIN } else { MOVES };
-    render_moves(ip, db, user.id, direction, template, cookies, cache, error_text).await
+    render_moves(ip, db, user, direction, template, cookies, cache, error_text).await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn render_moves(
     ip: IpAddr,
     db: Db,
-    user_id: i64,
+    user: Option<User>,
     direction: &str,
     template: &'static str,
     cookies: &CookieJar<'_>,
     cache: &State<Cache>,
     error_text: Option<&'static str>,
 ) -> Template {
+    let user_ref = user.as_ref();
     let moves_op = match direction {
-        MOVES_INCOMING => db::list_incoming_moves(&db, user_id).await,
-        MOVES_OUTGOING => db::list_outgoing_moves(&db, user_id).await,
-        MOVES_PAST => db::list_past_moves(&db, user_id).await,
+        MOVES_INCOMING => db::list_incoming_moves(&db, user_ref.unwrap().id).await,
+        MOVES_OUTGOING => db::list_outgoing_moves(&db, user_ref.unwrap().id).await,
+        MOVES_PAST => db::list_past_moves(&db, user_ref.unwrap().id).await,
         MOVES_ADMIN_VIEW => db::list_moves(&db).await,
         _ => {
             #[cfg(feature = "secure")]
@@ -547,7 +539,8 @@ async fn render_moves(
         }
     };
     if let Err(error) = moves_op {
-        log::error!("{}", error);
+        #[cfg(feature = "secure")]
+        log::error!("[from {}] Could not load moves: {}.", ip, error);
         return Template::render(INDEX, context!{ error_text: "internal error" });
     }
     let moves = moves_op.unwrap();
@@ -572,6 +565,7 @@ async fn render_moves(
             can_accept: can_accept,
             show_status: show_status,
             error_text: error_text,
+            user: user,
         }
     )
 }
@@ -590,20 +584,21 @@ async fn admin(
             log::warn!("[from: {}] User {} is not an admin.", ip, user.id);
             return Template::render(INDEX, context! { user: user });
         }
-        render_moves(ip, db, user.id, MOVES_ADMIN_VIEW, ADMIN, cookies, cache, None).await
+        render_moves(ip, db, Some(user), MOVES_ADMIN_VIEW, ADMIN, cookies, cache, None).await
     } else {
         #[cfg(feature = "secure")]
-        log::warn!("[from: {}] Attempted access to admin panel.", ip);
+        log::warn!("[from: {}] Attempted access to admin panel without being logged in.", ip);
         Template::render(INDEX, ())
     }
 }
 
 #[cfg(not(feature = "secure"))]
-#[get("/debug/<session_id>")]
-async fn debug(session_id: &str, sessions: &State<Sessions>) -> String {
+#[get("/debug/<encoded_id>")]
+async fn debug(encoded_id: &str, cookies: &CookieJar<'_>, sessions: &State<Sessions>) -> String {
     let mut session_id = ZERO_ID;
+    #[allow(clippy::collapsible_if)]
     if BASE64_URL_SAFE.decode_slice(encoded_id, &mut session_id).is_ok() {
-        if let Some(user_id) = sessions.fetch(session_id) {
+        if let Some(user_id) = sessions.fetch(session_id).await {
             return format!("the session id belongs to user id: {}", user_id);
         }
     }

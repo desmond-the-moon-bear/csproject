@@ -9,7 +9,7 @@
     <body>
         <header>
             {{#if user}}
-            <h1 class="hN"> greetings, {{user.name}} </h1>
+            <h1 class="hN"> home </h1>
             <h2 class="hN"> balance: {{user.points}}p </h2>
             {{else}}
             <h1 class="hN"> home </h1>
@@ -31,6 +31,11 @@
         <footer>
             {{#if error_text}}
                 <p>{{error_text}}</p>
+            {{/if}}
+            {{#if user}}
+                <p> logged in as {{user.name}} </p>
+            {{else}}
+                <p> not logged in </p>
             {{/if}}
         </footer>
     </body>
