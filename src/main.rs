@@ -148,19 +148,31 @@ async fn login_post(
     let result = db::verify_secret(&db, name, secret).await;
     match result {
         Ok(user) => {
+            //
+            // Fix for flaw 4: we must ensure that if the user somehow logs in again into a
+            // different account, the previous session is dropped as well. Flaw 4 includes that
+            // this code is not included.
+            //
             #[cfg(feature = "secure")]
             if let Some(previous_session_id) = get_session_id(ip, cookies) {
                 sessions.drop(previous_session_id).await;
             }
+
+
             #[cfg(feature = "secure")]
             log::info!("[from: {}] User {} logged in.", ip, user.id);
             let cookie = sessions.create(user.id).await;
             cookies.add(cookie);
             let template = Template::render(INDEX, context! { user: &user });
+
+            // Setting the cookie overwrites the previous session it stored.
             cache.set(user.id, user.name).await;
             template
         }
         Err(error) => {
+            //
+            // Fix for flaw 5:
+            //
             #[cfg(feature = "secure")]
             log::error!("[from: {}] Failed to authenticate user: {}.", ip, error);
             use db::VerificationError::*;
@@ -169,8 +181,13 @@ async fn login_post(
                 Db(_) => "user does not exist",
                 Phc(_) | Password(_) => "incorrect password",
             };
+
+            //
+            // Flaw 5:
+            //
             #[cfg(not(feature = "secure"))]
             let error_text = format!("{:?}", error);
+
             Template::render(LOR, context! { action: "login", error_text: error_text })
         }
     }
@@ -183,10 +200,18 @@ async fn logout(
     sessions: &State<Sessions>,
 ) -> Template {
     let session_id_op = get_session_id(ip, cookies);
+
+    //
+    // Flaw 4: only the cookie is removed, however, the session is not dropped.
+    //
     #[cfg(not(feature = "secure"))]
     if session_id_op.is_some() {
         cookies.remove(cache::SESSION_COOKIE_NAME);
     }
+
+    //
+    // Fix for flaw 4: the cookie is removed and the sesion is dropped as well.
+    //
     #[cfg(feature = "secure")]
     if let Some(session_id) = session_id_op {
         cookies.remove(cache::SESSION_COOKIE_NAME);
@@ -199,6 +224,7 @@ async fn logout(
     } else {
         log::warn!("[from: {}] Tried to log out with invalid (or nonexistant) session from cookie.", ip);
     }
+
     Template::render(INDEX, ())
 }
 
@@ -390,8 +416,7 @@ async fn moves(
     if user_op.is_none() {
         return Template::render(INDEX, context!{ error_text: "login first" });
     }
-    let user = user_op.unwrap();
-    render_moves(ip, db, Some(user), direction, MOVES, cache, None).await
+    render_moves(ip, db, user_op, direction, MOVES, cache, None).await
 }
 
 const ACTION_ACCEPT: &str = "accept";
@@ -412,6 +437,11 @@ async fn update(
     #[allow(unused_assignments)]
     let mut user: Option<User> = None;
 
+    //
+    // Fix for flaw 1: get the user from the session in order to confirm they can perform the
+    // update instead of trusting that if they can access this request handler, that they are also
+    // authorised to perform the action.
+    //
     #[cfg(feature = "secure")]
     {
         let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
@@ -426,6 +456,10 @@ async fn update(
     match direction {
         MOVES_INCOMING | MOVES_OUTGOING  => (),
         MOVES_ADMIN_VIEW => {
+            //
+            // Fix for flaw 1: check whether the user is an admin in order to proceed to the admin
+            // view.
+            //
             #[cfg(feature = "secure")]
             if !user.as_ref().unwrap().admin {
                 log::warn!("[from: {}] Tried to update move without being an admin.", ip);
@@ -479,6 +513,9 @@ async fn update(
         });
     }
 
+    //
+    // Fix for flaw 1: include a check
+    //
     #[cfg(feature = "secure")]
     if !user.as_ref().unwrap().admin {
         let user = user.as_ref().unwrap();

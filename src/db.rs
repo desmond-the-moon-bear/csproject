@@ -207,6 +207,9 @@ pub enum VerificationError {
     Password(PasswordError),
 }
 
+//
+// Fix for flaw 3:
+//
 #[cfg(feature = "secure")]
 pub async fn verify_secret(
     db: &Db,
@@ -219,6 +222,9 @@ pub async fn verify_secret(
     Ok(user)
 }
 
+//
+// Flaw 3:
+//
 #[cfg(not(feature = "secure"))]
 pub async fn verify_secret(
     db: &Db,

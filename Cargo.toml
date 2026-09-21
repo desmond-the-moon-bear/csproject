@@ -15,6 +15,9 @@ chrono = { version = "0.4.45" }
 
 [dependencies.rocket]
 path = "./deps/Rocket/core/lib"
+#
+# Flaw 2: tls is not enabled.
+#
 features = ["secrets"]
 
 [dependencies.rocket_dyn_templates]
@@ -27,5 +30,8 @@ features = ["sqlite_pool"]
 
 [features]
 default = ["secure"]
+#
+# Fix for flaw 2:
+#
 secure = ["rocket/tls"]
 
