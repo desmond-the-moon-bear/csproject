@@ -1,4 +1,3 @@
-#![allow(unused)]
 mod db;
 mod cache;
 
@@ -8,19 +7,18 @@ use cache::{Cache, Sessions, Id, ZERO_ID};
 use std::net::IpAddr;
 
 use argon2::{
-    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
+    password_hash::PasswordHasher,
     Argon2
 };
 
 use base64::prelude::*;
 
-use chrono::{DateTime, Local};
 
 use rocket::fairing::AdHoc;
 use rocket::{FromForm, form::Form};
 use rocket::fs::{FileServer, relative};
 use rocket::{get, post, launch, routes};
-use rocket::http::{Cookie, CookieJar};
+use rocket::http::CookieJar;
 use rocket::State;
 
 use rocket_dyn_templates::{Template, context};
@@ -49,7 +47,10 @@ fn rocket() -> _ {
     {
         rocket = rocket.attach(cache::Timeout);
     }
-    #[cfg(not(feature = "secure"))]
+
+    // This request handler is only for demonstration purposes and would not be included in a
+    // secure website. Fix: uncomment this cfg directive.
+    // #[cfg(not(feature = "secure"))]
     {
         rocket = rocket.mount("/", routes![debug]);
     }
@@ -149,14 +150,14 @@ async fn login_post(
         Ok(user) => {
             #[cfg(feature = "secure")]
             if let Some(previous_session_id) = get_session_id(ip, cookies) {
-                sessions.drop(previous_session_id);
+                sessions.drop(previous_session_id).await;
             }
             #[cfg(feature = "secure")]
             log::info!("[from: {}] User {} logged in.", ip, user.id);
             let cookie = sessions.create(user.id).await;
             cookies.add(cookie);
             let template = Template::render(INDEX, context! { user: &user });
-            cache.set(user.id, user.name);
+            cache.set(user.id, user.name).await;
             template
         }
         Err(error) => {
@@ -178,10 +179,8 @@ async fn login_post(
 #[get("/logout")]
 async fn logout(
     ip: IpAddr,
-    db: Db,
     cookies: &CookieJar<'_>,
     sessions: &State<Sessions>,
-    cache: &State<Cache>
 ) -> Template {
     let session_id_op = get_session_id(ip, cookies);
     #[cfg(not(feature = "secure"))]
@@ -322,7 +321,7 @@ async fn send_post(
         Ok(value) => value,
         Err(error) => {
             #[cfg(feature = "secure")]
-            log::warn!("[from: {}] Invalid amount passed: {}.", ip, amount);
+            log::warn!("[from: {}] Invalid amount passed: {}. Error: {}.", ip, amount, error);
             return Template::render(SEND, context!{ user: user, error_text: "amount must be a positive integer" });
         }
     };
@@ -362,7 +361,7 @@ async fn send_post(
         #[cfg(feature = "secure")]
         log::error!("[from: {}] Error creating move: {}.", ip, error);
         let error_text = match error {
-            db::TransactionError::Db(error) => "internal error",
+            db::TransactionError::Db(_) => "internal error",
             db::TransactionError::Detailed(detailed_error) => detailed_error.reason,
         };
         return Template::render(SEND, context!{ user: user, error_text: error_text });
@@ -392,7 +391,7 @@ async fn moves(
         return Template::render(INDEX, context!{ error_text: "login first" });
     }
     let user = user_op.unwrap();
-    render_moves(ip, db, Some(user), direction, MOVES, cookies, cache, None).await
+    render_moves(ip, db, Some(user), direction, MOVES, cache, None).await
 }
 
 const ACTION_ACCEPT: &str = "accept";
@@ -410,7 +409,9 @@ async fn update(
     sessions: &State<Sessions>,
     cache: &State<Cache>
 ) -> Template {
-    let mut user = None;
+    #[allow(unused_assignments)]
+    let mut user: Option<User> = None;
+
     #[cfg(feature = "secure")]
     {
         let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
@@ -428,7 +429,7 @@ async fn update(
             #[cfg(feature = "secure")]
             if !user.as_ref().unwrap().admin {
                 log::warn!("[from: {}] Tried to update move without being an admin.", ip);
-                return Template::render(INDEX, context!{ error_text: "not an admin" });
+                return Template::render(INDEX, context!{ error_text: "not an admin", user: user });
             }
         }
         _ => {
@@ -437,7 +438,8 @@ async fn update(
             return Template::render(
                 INDEX,
                 context! {
-                    error_text: format!("'{}' is not a valid move type", direction)
+                    error_text: format!("'{}' is not a valid move type", direction),
+                    user: user,
                 }
             );
         }
@@ -449,7 +451,10 @@ async fn update(
         _ => {
             #[cfg(feature = "secure")]
             log::error!("[from: {}] Invalid move operation: {}.", ip, action);
-            return Template::render(INDEX, context!{ error_text: "invalid move operation" });
+            return Template::render(INDEX, context!{
+                error_text: "invalid move operation",
+                user: user,
+            });
         }
     };
 
@@ -458,14 +463,20 @@ async fn update(
         Err(error) => {
             #[cfg(feature = "secure")]
             log::error!("[from: {}] Move error: {}.", ip, error);
-            return Template::render(INDEX, context!{ error_text: "move does not exist" });
+            return Template::render(INDEX, context!{
+                error_text: "move does not exist",
+                user: user,
+            });
         }
     };
 
     if move_instance.status != MoveStatus::New {
         #[cfg(feature = "secure")]
-        log::error!("[from: {}] Tried to update non-new move (user_id: {:?}).", ip, user.unwrap().id);
-        return Template::render(INDEX, context!{ error_text: "cannot update a non-new move" });
+        log::error!("[from: {}] Tried to update non-new move (user_id: {:?}).", ip, user.as_ref().unwrap().id);
+        return Template::render(INDEX, context!{
+            error_text: "cannot update a non-new move",
+            user: user,
+        });
     }
 
     #[cfg(feature = "secure")]
@@ -475,14 +486,20 @@ async fn update(
             && move_instance.receiver != user.id
         {
             log::error!("[from: {}] User {} tried to accept an invalid move: {:?}.", ip, user.id, move_instance);
-            return Template::render(INDEX, context!{ error_text: "cannot accept someone else's move" });
+            return Template::render(INDEX, context!{
+                error_text: "cannot accept someone else's move",
+                user: user,
+            });
         }
         if new_move_status == MoveStatus::Cancelled
             && move_instance.sender != user.id
             && move_instance.receiver != user.id
         {
             log::error!("[from: {}] User {} tried to cancel an invalid move: {:?}.", ip, user.id, move_instance);
-            return Template::render(INDEX, context!{ error_text: "cannot cancel a move you are not part of" });
+            return Template::render(INDEX, context!{
+                error_text: "cannot cancel a move you are not part of",
+                user: user,
+            });
         }
     } else {
         log::info!(
@@ -507,7 +524,7 @@ async fn update(
     };
 
     let template = if direction == MOVES_ADMIN_VIEW { ADMIN } else { MOVES };
-    render_moves(ip, db, user, direction, template, cookies, cache, error_text).await
+    render_moves(ip, db, user, direction, template, cache, error_text).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -517,7 +534,6 @@ async fn render_moves(
     user: Option<User>,
     direction: &str,
     template: &'static str,
-    cookies: &CookieJar<'_>,
     cache: &State<Cache>,
     error_text: Option<&'static str>,
 ) -> Template {
@@ -533,7 +549,8 @@ async fn render_moves(
             return Template::render(
                 INDEX,
                 context! {
-                    error_text: format!("'{}' is not a valid move type", direction)
+                    error_text: format!("'{}' is not a valid move type", direction),
+                    user: user,
                 }
             );
         }
@@ -541,7 +558,10 @@ async fn render_moves(
     if let Err(error) = moves_op {
         #[cfg(feature = "secure")]
         log::error!("[from {}] Could not load moves: {}.", ip, error);
-        return Template::render(INDEX, context!{ error_text: "internal error" });
+        return Template::render(INDEX, context!{
+            error_text: "internal error",
+            user: user,
+        });
     }
     let moves = moves_op.unwrap();
 
@@ -584,7 +604,7 @@ async fn admin(
             log::warn!("[from: {}] User {} is not an admin.", ip, user.id);
             return Template::render(INDEX, context! { user: user });
         }
-        render_moves(ip, db, Some(user), MOVES_ADMIN_VIEW, ADMIN, cookies, cache, None).await
+        render_moves(ip, db, Some(user), MOVES_ADMIN_VIEW, ADMIN, cache, None).await
     } else {
         #[cfg(feature = "secure")]
         log::warn!("[from: {}] Attempted access to admin panel without being logged in.", ip);
@@ -592,9 +612,11 @@ async fn admin(
     }
 }
 
-#[cfg(not(feature = "secure"))]
+// This request handler is only for demonstration purposes and would not be included in a
+// secure website. Fix: uncomment this cfg directive.
+// #[cfg(not(feature = "secure"))]
 #[get("/debug/<encoded_id>")]
-async fn debug(encoded_id: &str, cookies: &CookieJar<'_>, sessions: &State<Sessions>) -> String {
+async fn debug(encoded_id: &str, sessions: &State<Sessions>) -> String {
     let mut session_id = ZERO_ID;
     #[allow(clippy::collapsible_if)]
     if BASE64_URL_SAFE.decode_slice(encoded_id, &mut session_id).is_ok() {
@@ -604,3 +626,4 @@ async fn debug(encoded_id: &str, cookies: &CookieJar<'_>, sessions: &State<Sessi
     }
     String::from("no active session")
 }
+

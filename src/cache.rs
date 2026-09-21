@@ -1,6 +1,7 @@
-use super::db::{self, Db, User, Move, MoveStatus};
+use super::db::{self, Db, Move, MoveStatus};
 
 use std::collections::HashMap;
+#[cfg(not(feature = "secure"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::SystemTime;
