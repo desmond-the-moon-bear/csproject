@@ -91,6 +91,9 @@ struct SessionIdGenerator {
 }
 
 impl SessionIdGenerator {
+    //
+    // Flaw 4:
+    //
     #[cfg(not(feature = "secure"))]
     async fn generate(&self) -> Id {
         let mut bytes = [0u8; 16];
@@ -99,6 +102,9 @@ impl SessionIdGenerator {
         bytes
     }
 
+    //
+    // Fix for flaw 4:
+    //
     #[cfg(feature = "secure")]
     async fn generate(&self) -> Id {
         let mut bytes = ZERO_ID;
