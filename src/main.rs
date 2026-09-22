@@ -416,7 +416,7 @@ async fn moves(
     if user_op.is_none() {
         return Template::render(INDEX, context!{ error_text: "login first" });
     }
-    render_moves(ip, db, user_op, direction, MOVES, cache, None).await
+    render_moves(ip, db, user_op.unwrap(), direction, MOVES, cache, None).await
 }
 
 const ACTION_ACCEPT: &str = "accept";
@@ -434,24 +434,13 @@ async fn update(
     sessions: &State<Sessions>,
     cache: &State<Cache>
 ) -> Template {
-    #[allow(unused_assignments)]
-    let mut user: Option<User> = None;
-
-    //
-    // Fix for flaw 1: get the user from the session in order to confirm they can perform the
-    // update instead of trusting that if they can access this request handler, that they are also
-    // authorised to perform the action.
-    //
-    #[cfg(feature = "secure")]
-    {
-        let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
-        if user_op.is_none() {
-            #[cfg(feature = "secure")]
-            log::warn!("[from: {}] Tried to update move without logging in first.", ip);
-            return Template::render(INDEX, context!{ error_text: "login first" });
-        }
-        user = user_op;
+    let user_op = fetch_and_cache_user(ip, &db, cookies, sessions, cache).await;
+    if user_op.is_none() {
+        #[cfg(feature = "secure")]
+        log::warn!("[from: {}] Tried to update move without logging in first.", ip);
+        return Template::render(INDEX, context!{ error_text: "login first" });
     }
+    let user = user_op.unwrap();
 
     match direction {
         MOVES_INCOMING | MOVES_OUTGOING  => (),
@@ -461,7 +450,7 @@ async fn update(
             // view.
             //
             #[cfg(feature = "secure")]
-            if !user.as_ref().unwrap().admin {
+            if !user.admin {
                 log::warn!("[from: {}] Tried to update move without being an admin.", ip);
                 return Template::render(INDEX, context!{ error_text: "not an admin", user: user });
             }
@@ -506,7 +495,7 @@ async fn update(
 
     if move_instance.status != MoveStatus::New {
         #[cfg(feature = "secure")]
-        log::error!("[from: {}] Tried to update non-new move (user_id: {:?}).", ip, user.as_ref().unwrap().id);
+        log::error!("[from: {}] Tried to update non-new move (user_id: {:?}).", ip, user.id);
         return Template::render(INDEX, context!{
             error_text: "cannot update a non-new move",
             user: user,
@@ -517,8 +506,7 @@ async fn update(
     // Fix for flaw 1: include a check
     //
     #[cfg(feature = "secure")]
-    if !user.as_ref().unwrap().admin {
-        let user = user.as_ref().unwrap();
+    if !user.admin {
         if new_move_status == MoveStatus::Accepted
             && move_instance.receiver != user.id
         {
@@ -541,7 +529,7 @@ async fn update(
     } else {
         log::info!(
             "[from: {}] Admin {} changes move {:?} to status {:?}.",
-            ip, user.as_ref().unwrap().id, move_instance, new_move_status
+            ip, user.id, move_instance, new_move_status
         );
     }
 
@@ -568,17 +556,16 @@ async fn update(
 async fn render_moves(
     ip: IpAddr,
     db: Db,
-    user: Option<User>,
+    user: User,
     direction: &str,
     template: &'static str,
     cache: &State<Cache>,
     error_text: Option<&'static str>,
 ) -> Template {
-    let user_ref = user.as_ref();
     let moves_op = match direction {
-        MOVES_INCOMING => db::list_incoming_moves(&db, user_ref.unwrap().id).await,
-        MOVES_OUTGOING => db::list_outgoing_moves(&db, user_ref.unwrap().id).await,
-        MOVES_PAST => db::list_past_moves(&db, user_ref.unwrap().id).await,
+        MOVES_INCOMING => db::list_incoming_moves(&db, user.id).await,
+        MOVES_OUTGOING => db::list_outgoing_moves(&db, user.id).await,
+        MOVES_PAST => db::list_past_moves(&db, user.id).await,
         MOVES_ADMIN_VIEW => db::list_moves(&db).await,
         _ => {
             #[cfg(feature = "secure")]
@@ -641,7 +628,7 @@ async fn admin(
             log::warn!("[from: {}] User {} is not an admin.", ip, user.id);
             return Template::render(INDEX, context! { user: user });
         }
-        render_moves(ip, db, Some(user), MOVES_ADMIN_VIEW, ADMIN, cache, None).await
+        render_moves(ip, db, user, MOVES_ADMIN_VIEW, ADMIN, cache, None).await
     } else {
         #[cfg(feature = "secure")]
         log::warn!("[from: {}] Attempted access to admin panel without being logged in.", ip);

@@ -5,6 +5,15 @@ This project was built and tested with (and requires) Rust 1.98. Follow the
 instructions on [this](https://rust-lang.org/tools/install/) page for your
 operating system.
 
+If you are using Windows, you might encounter some difficulty if you do not have
+Visual Studio (NOT VSCode) installed, which Rust uses for its linker and
+libraries, although the rust installer should handle everything automatically.
+Here are pages with further instructions if you encounter problems:
+[1](https://doc.rust-lang.org/book/ch01-01-installation.html#installing-rustup-on-windows)
+and
+[2](https://rust-lang.github.io/rustup/installation/windows-msvc.html).
+Prefer using the MSVC and not GNU ABI (on Windows).
+
 # How to
 
 Before running the server create the "data" directory in the same folder as the
